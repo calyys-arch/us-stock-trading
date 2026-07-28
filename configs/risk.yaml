@@ -1,0 +1,25 @@
+# Risk configuration — see python/core/risk_engine.py:RiskConfig for the
+# authoritative field list and enforcement points. Every key here MUST have
+# a matching test in tests/test_config_enforcement.py (forex-trading lesson
+# #2: a dead config key, auto_execute, existed with no enforcement — see
+# docs/lessons_from_forex_trading.md).
+
+max_adv_participation_pct: 0.01     # 1% of 20-day ADV per order (Chan p.85-90)
+max_sector_exposure_pct: 0.30       # 30% of gross capital per GICS sector
+max_single_position_pct: 0.10       # 10% of gross capital per name
+
+pdt_equity_threshold: 25000.0       # FINRA Pattern Day Trader threshold (USD)
+max_day_trades_rolling_5d: 3        # FINRA Rule 4210 limit below the PDT threshold
+
+reg_t_intraday_leverage: 4.0        # Reg T day-trading buying power (PDT-qualified accounts)
+reg_t_overnight_leverage: 2.0       # Reg T overnight/Strategy-A leverage cap
+
+kelly_multiplier: 0.5               # half-Kelly haircut (Chan p.70)
+max_gross_leverage: 2.0             # portfolio-wide gross leverage cap post-Kelly
+
+require_short_locate: true          # hard-reject any short leg without a locate
+min_price: 5.0                      # Chan Ch.5: exclude sub-$5 stocks
+
+# Acceptance gate (forex lesson #4: transaction costs dominated gross edge
+# in every one of 9 forex strategies except a thin slice of one).
+min_gross_to_cost_ratio: 2.0        # gross expectancy must be >= 2x round-trip cost

@@ -1,0 +1,45 @@
+# Architecture Rules
+
+This project's runtime architecture is derived from `forex-trading` but is
+**US-equity-only**. It follows Ernest P. Chan's *Quantitative Trading*
+methodology: cointegrated pairs trading + cross-sectional mean reversion,
+Kelly-based capital allocation, and a rigorous backtest-integrity checklist
+(look-ahead bias, data-snooping bias, survivorship bias, transaction costs).
+
+## Layer Ownership
+
+- **Execution / order submission** must only happen in `python/core/execution_gateway.py`
+  → broker adapters (`python/interfaces/ibkr_broker.py`). No other module may call
+  broker APIs directly.
+- **Signal layer** (`python/core/signal_engine.py`, `python/core/strategies/`) must
+  not import any broker package (`ib_async`) and must not do network I/O. Strategies
+  are pure functions of `(MarketSnapshot, MarketState)` → `Optional[RawSignal]`
+  (single-instrument) or of a universe snapshot → target weight vector
+  (`PortfolioStrategy`, cross-sectional).
+- **Pairs / spread trading** uses `SpreadOrder` + `PairPositionManager`, never a
+  single-leg `RawSignal` — a pair is two legs with a hedge ratio, not one instrument.
+
+## Chan Discipline (enforced by tests, not just convention)
+
+- **Max 5 free parameters per strategy** (`configs/strategy.yaml` schema is validated
+  against this in `tests/test_chan_guards.py`).
+- **No look-ahead bias**: every feature/signal computation must use data available
+  at or before the decision timestamp. The truncation test in
+  `tests/test_lookahead_bias.py` must pass for every strategy.
+- **No stop-loss on mean-reversion signals** — a reversal model that fires again
+  after a loss is, by construction, still recommending the same trade. Only
+  momentum-classified strategies may use stop-loss exits.
+- **Any config/guard key must have a real enforcement point.** `tests/test_wiring_parity.py`
+  and `tests/test_config_enforcement.py` exist specifically because the predecessor
+  forex system shipped three strategies that were silently dead in live trading
+  (unfilled snapshot fields) and one dead config key (`auto_execute` was unread by
+  any code for a period) — see `docs/lessons_from_forex_trading.md`.
+
+```python
+# ❌ BAD — strategy layer calling broker API
+from ib_async import IB
+strategy.py → ib.placeOrder(...)
+
+# ✅ GOOD — strategy publishes a signal; execution_gateway handles the rest
+bus.publish("raw_signal", signal)
+```

@@ -1,0 +1,38 @@
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Secrets
+.env
+
+# Runtime state / backups (regenerated at runtime)
+outputs/runtime/backups/
+outputs/runtime/history/
+outputs/runtime/*.json
+logs/*.log
+data/*.db
+data/*.db-shm
+data/*.db-wal
+data/ticks/*.jsonl
+data/sessions/*.jsonl
+data/signals/*.jsonl
+
+# Trained model artifacts (versioned separately in model_registry, not git)
+outputs/models/
+
+# Node / frontend
+frontend/node_modules/
+frontend/dist/
+frontend/*.tsbuildinfo
+.vite/
+
+# Rust (if execution_layer is ever added)
+target/
+
+# OS
+.DS_Store
+Thumbs.db

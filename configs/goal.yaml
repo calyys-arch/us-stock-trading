@@ -1,0 +1,22 @@
+# Acceptance thresholds for backtest -> live promotion decisions.
+# Read by scripts/run_backtest.py and scripts/health_check.py.
+
+wfo:
+  min_oos_sharpe: 0.5
+  max_oos_drawdown: 0.25
+  min_pass_folds_ratio: 0.60
+
+monte_carlo:
+  min_p5_sharpe: 0.0          # 5th-percentile bootstrap Sharpe must stay non-negative
+
+reality_check:
+  max_p_value: 0.05            # White's Reality Check pass threshold
+
+cost_gate:
+  min_gross_to_cost_ratio: 2.0  # mirrors configs/risk.yaml min_gross_to_cost_ratio
+
+live_promotion:
+  # A strategy needs auto_execute: true in configs/strategy.yaml AND to have
+  # passed all of the above gates on the SAME backtest run before it may be
+  # promoted out of observe-only mode.
+  require_all_gates_pass: true

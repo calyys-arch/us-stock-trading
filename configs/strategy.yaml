@@ -1,0 +1,29 @@
+# Strategy configuration. Chan Ch.3 discipline: <= 5 free parameters per
+# strategy — enforced by tests/test_chan_guards.py:test_max_five_parameters.
+#
+# `auto_execute: false` means the strategy runs in OBSERVE mode: signals are
+# generated and logged (data/signals/*.jsonl) but ExecutionGateway will not
+# submit any order (ExecutionGateway.mode must be "auto" AND this flag must
+# be true — tests/test_config_enforcement.py verifies BOTH gates are read).
+
+pairs_trading:
+  enabled: true
+  auto_execute: false
+  entry_z: 2.0
+  exit_z: 0.5
+  coint_lookback_days: 252
+  revalidate_every_days: 21
+  notional_per_leg: 50000.0
+  half_life_multiplier_max_hold: 3.0
+  min_half_life_days: 1.0
+  max_half_life_days: 60.0
+  allow_overnight: true          # confirmed constraint: pairs may hold overnight
+
+xsection_mean_reversion:
+  enabled: true
+  auto_execute: false
+  lookback_days: 1
+  gross_leverage_target: 1.0
+  min_universe_size: 20
+  allow_overnight: false         # confirmed constraint: intraday only, flatten by close
+  flatten_buffer_minutes: 5      # flatten window before the 16:00 ET close
