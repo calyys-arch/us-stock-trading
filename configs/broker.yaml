@@ -19,7 +19,18 @@
 #   "IBKR: Disconnected" rather than silently pretending to be live.
 #   NEVER point broker_port/feed_port at a LIVE-account port (4001/7496)
 #   from this MVP dashboard — there is no live-trading UI safety net here.
-data_source: ibkr_paper
+#
+# NOTE: this key only gates dashboard/engine_bridge.py's EngineRuntime (the
+# "Start (Paper)" button in the web dashboard). It has no effect on the
+# offline backtest/WFO scripts (python/data/price_cache.py uses
+# historical_data_source below) or on scripts/capture_market_microstructure.py
+# (always connects directly to IB Gateway for tick/L2 capture regardless of
+# this switch). Flip this to ibkr_paper locally whenever you want to test
+# the live dashboard against a real IB Gateway/TWS paper session — just
+# don't commit that change; the checked-in default must stay `simulated`
+# (test_broker_yaml_data_source_is_actually_read_by_engine_runtime enforces
+# this so a `git pull` can never silently start requiring IB Gateway).
+data_source: simulated
 
 # Where BACKTEST/RESEARCH historical daily bars come from
 # (python/data/price_cache.py):
