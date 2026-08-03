@@ -1,4 +1,5 @@
 import type { ExecutionReportDto, SignalDto } from '../types'
+import MosaicWindow from './MosaicWindow'
 
 interface Props {
   signals: SignalDto[]
@@ -7,11 +8,10 @@ interface Props {
 
 export default function SignalsLog({ signals, reports }: Props) {
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12 }}>
-      <div className="panel" style={{ overflow: 'auto', maxHeight: 260 }}>
-        <h3 style={{ marginTop: 0, fontSize: 14 }}>Recent Signals</h3>
+    <div className="signals-grid">
+      <MosaicWindow title="Recent Signals">
         {signals.length === 0 ? (
-          <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>No signals yet.</div>
+          <div style={{ color: 'var(--text-dim)', fontSize: 12 }}>No signals yet.</div>
         ) : (
           <table>
             <thead><tr><th>Strategy</th><th>Time</th></tr></thead>
@@ -19,18 +19,17 @@ export default function SignalsLog({ signals, reports }: Props) {
               {signals.map((s, i) => (
                 <tr key={s.id ?? i}>
                   <td>{s.strategy}</td>
-                  <td>{s.timestamp ? new Date(s.timestamp).toLocaleTimeString() : '—'}</td>
+                  <td className="num">{s.timestamp ? new Date(s.timestamp).toLocaleTimeString() : '—'}</td>
                 </tr>
               ))}
             </tbody>
           </table>
         )}
-      </div>
+      </MosaicWindow>
 
-      <div className="panel" style={{ overflow: 'auto', maxHeight: 260 }}>
-        <h3 style={{ marginTop: 0, fontSize: 14 }}>Execution Reports</h3>
+      <MosaicWindow title="Execution Reports">
         {reports.length === 0 ? (
-          <div style={{ color: 'var(--text-dim)', fontSize: 13 }}>No execution reports yet.</div>
+          <div style={{ color: 'var(--text-dim)', fontSize: 12 }}>No execution reports yet.</div>
         ) : (
           <table>
             <thead><tr><th>Type</th><th>Reason</th></tr></thead>
@@ -44,7 +43,7 @@ export default function SignalsLog({ signals, reports }: Props) {
             </tbody>
           </table>
         )}
-      </div>
+      </MosaicWindow>
     </div>
   )
 }

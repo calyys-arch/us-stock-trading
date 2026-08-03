@@ -1,0 +1,48 @@
+# Parameter search grids for the self-improve WFO loop
+# (scripts/self_improve_loop.py -> python/backtest/optimize.py).
+#
+# Discipline (Chan Ch.3, enforced by python/backtest/param_guard.py and
+# optimize.py's pre-flight checks):
+#   - Only keys that are GENUINE free parameters of the strategy may appear
+#     here (never housekeeping keys like enabled/auto_execute, and never
+#     data-window settings like coint_lookback_days).
+#   - Every gridded key must already exist in configs/strategy.yaml — the
+#     grid OVERRIDES current values, it cannot introduce new knobs.
+#   - Keep grids coarse (3-4 values per axis). A fine grid over a short
+#     window is curve-fitting with extra steps; WFO's per-fold
+#     re-optimization only demonstrates robustness when the candidate set
+#     is small enough that winning repeatedly means something.
+
+pairs_trading:
+  entry_z: [1.5, 2.0, 2.5]
+  exit_z: [0.0, 0.5, 1.0]
+  half_life_multiplier_max_hold: [2.0, 3.0, 4.0]
+  # min/max_half_life_days stay FIXED at configs/strategy.yaml values:
+  # they define which spreads are tradeable at all (an eligibility filter),
+  # and optimizing eligibility bounds against returns is a classic
+  # data-snooping trap.
+
+xsection_mean_reversion:
+  lookback_days: [1, 3, 5]
+  gross_leverage_target: [0.5, 1.0]
+  # min_universe_size stays FIXED: it is a data-sufficiency guard tied to
+  # the fixed top-20 universe (configs/universe.yaml), not a signal knob.
+
+# Microstructure signals (docs/microstructure_pivot_plan.md §1, §4c). Grids
+# stay coarse (2-3 values/axis) for the same reason as above, and are
+# doubly important here: intraday signals have far more room to overfit
+# noise than a daily strategy given how many bars there are per day.
+
+sweep_reclaim:
+  sweep_min_atr: [0.10, 0.15, 0.20]
+  reclaim_bars: [2, 3, 5]
+  stop_atr_mult: [0.15, 0.25, 0.35]
+
+fvg_retest:
+  vol_mult: [1.5, 2.0, 3.0]
+  entry_pct: [0.3, 0.5, 0.7]
+  expiry_bars: [5, 10, 15]
+
+orb_vwap:
+  or_minutes: [5, 15, 30]
+  vwap_side_filter: [true, false]

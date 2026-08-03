@@ -17,9 +17,33 @@ logs/*.log
 data/*.db
 data/*.db-shm
 data/*.db-wal
-data/ticks/*.jsonl
 data/sessions/*.jsonl
 data/signals/*.jsonl
+
+# Local research-data caches (regenerable via scripts/refresh_universe.py,
+# scripts/refresh_event_data.py, scripts/capture_market_microstructure.py)
+# NOTE: data/ticks/ used to only ignore *.jsonl directly under it; tick
+# capture now nests per-symbol subdirectories (data/ticks/<SYMBOL>/<date>.jsonl)
+# so the whole directory is ignored, same as data/depth/.
+data/history/
+data/history_1m/
+data/ticks/
+data/depth/
+# scripts/sync_uhai.py's offline export + watermark — regenerable, and
+# points at whatever UHAI_GREYCAT_URL happens to be configured locally.
+data/uhai_sync/
+data/news/
+data/calendar/
+data/filings/
+# scripts/backfill_finra_ats.py's cache — regenerable from FINRA's public
+# OTC Transparency API (see python/data/finra_ats.py).
+data/finra_ats/
+
+# All generated backtest reports/logs (backtests/reports/*.md,*.json,
+# backtests/logs/*.jsonl) — regenerable by re-running scripts/run_backtest.py,
+# self_improve_loop.py, run_intraday_backtest.py. Kept out of git the same
+# way data/promotion_history.jsonl was before this folder consolidation.
+backtests/
 
 # Trained model artifacts (versioned separately in model_registry, not git)
 outputs/models/
@@ -36,3 +60,7 @@ target/
 # OS
 .DS_Store
 Thumbs.db
+
+# Scratch / manual UI-check artifacts (screenshots, ad-hoc logs)
+tmp/
+files/

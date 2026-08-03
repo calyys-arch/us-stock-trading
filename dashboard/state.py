@@ -19,6 +19,22 @@ class DashboardState:
     mode: str = "observe"          # "observe" | "auto" — mirrors ExecutionGateway.mode
     started_at: str | None = None
 
+    # Data source — set once from configs/broker.yaml at EngineRuntime
+    # construction, NOT a runtime toggle (mirrors strategy.yaml's
+    # auto_execute philosophy: this is an operational decision, not a
+    # dashboard button). "simulated" needs no external connection at all;
+    # "ibkr_paper" requires IB Gateway/TWS to be running and logged into the
+    # paper account — ibkr_*_connected reflect the REAL connection state so
+    # the UI never silently pretends a live session exists.
+    data_source: str = "simulated"      # "simulated" | "ibkr_paper"
+    ibkr_broker_connected: bool = False  # meaningful only when data_source == "ibkr_paper"
+    ibkr_feed_connected: bool = False    # meaningful only when data_source == "ibkr_paper"
+
+    # Live tick-feed symbol universe (EngineRuntime.symbols) — used by the
+    # dashboard's Symbol Chart panel as quick-select chips. NOT the same as
+    # configs/universe.yaml's larger backtest/research universe.
+    symbols: list = field(default_factory=list)
+
     # Strategy A — pairs
     open_pairs: list = field(default_factory=list)          # [OpenPairPosition-like dicts]
     pair_candidates: list = field(default_factory=list)      # latest pair_scanner.scan() results
@@ -63,6 +79,10 @@ class DashboardState:
                 "running": self.running,
                 "mode": self.mode,
                 "started_at": self.started_at,
+                "data_source": self.data_source,
+                "ibkr_broker_connected": self.ibkr_broker_connected,
+                "ibkr_feed_connected": self.ibkr_feed_connected,
+                "symbols": list(self.symbols),
                 "open_pairs": list(self.open_pairs),
                 "pair_candidates": list(self.pair_candidates),
                 "latest_portfolio_target": self.latest_portfolio_target,

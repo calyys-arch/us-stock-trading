@@ -66,6 +66,10 @@ class IbkrBroker:
             host, port, client_id, self._connected,
         )
 
+    @property
+    def is_connected(self) -> bool:
+        return bool(self._connected and self._ib is not None and self._ib.isConnected())
+
     async def _make_lock(self) -> asyncio.Lock:
         return asyncio.Lock()
 
@@ -114,12 +118,22 @@ class IbkrBroker:
         qty: int,
         limit_price: float = 0.0,
         order_type: str = "market",
+        stop_price: float = 0.0,
         tif: str = "DAY",
     ) -> dict:
-        """Submit an order for a US equity. `order_type`: "market" | "limit".
+        """Submit an order for a US equity. `order_type`: "market" | "limit" |
+        "stop_limit" (the last requires both `limit_price` and `stop_price`).
         DAY time-in-force by default (matches Chan's intraday-flatten design
         for Strategy B; Strategy A's overnight holds use explicit GTC on the
         exit order instead of relying on TIF to survive past session close).
+
+        NOTE: this adapter still accepts order_type="market" for direct/unit
+        -test callers, but python/core/execution_gateway.py — the ONLY
+        module allowed to call this in a live/paper run (architecture-rules
+        .mdc) — enforces "never submit a market order" at its own chokepoint
+        (ExecutionGateway._submit_order) before it ever reaches here. That
+        enforcement lives there, not in this adapter, so this class stays a
+        thin, order-type-agnostic broker wrapper.
 
         Returns {"accepted": bool, "order_id": str|None, "reason": str|None,
         "filled_qty": int, "avg_fill_price": float}.
@@ -138,14 +152,16 @@ class IbkrBroker:
             return trade
 
         async def _submit():
-            from ib_async import Stock, MarketOrder, LimitOrder
+            from ib_async import Stock, MarketOrder, LimitOrder, StopLimitOrder
 
             await self._ensure_connected_async()
             contract = Stock(code.upper(), "SMART", "USD")
             await self._ib.qualifyContractsAsync(contract)
             contract_holder["contract"] = contract
 
-            if order_type == "limit" and limit_price > 0:
+            if order_type == "stop_limit" and limit_price > 0 and stop_price > 0:
+                order = StopLimitOrder(action, qty, round(limit_price, 2), round(stop_price, 2))
+            elif order_type == "limit" and limit_price > 0:
                 order = LimitOrder(action, qty, round(limit_price, 2))
             else:
                 order = MarketOrder(action, qty)

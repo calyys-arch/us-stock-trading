@@ -305,6 +305,13 @@ class QualifiedSpreadOrder:
     approved: bool
     rejection_reason: Optional[str] = None
     metadata: dict = field(default_factory=dict)
+    # Marketable-limit prices computed by RiskEngine.qualify_spread_order at
+    # the SAME snapshot.price used for sizing above — 0.0 means "not
+    # computed" (e.g. a hand-built test order), which ExecutionGateway's
+    # never-market-orders chokepoint (_submit_order) treats as a hard reject,
+    # never a silent fallback to a market order.
+    limit_price_a: float = 0.0
+    limit_price_b: float = 0.0
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -334,4 +341,34 @@ class QualifiedPortfolioOrder:
     estimated_cost: float = 0.0
     kelly_fraction_used: float = 0.0
     approved: bool = True
+    metadata: dict = field(default_factory=dict)
+    # {code: marketable-limit price}, computed by
+    # RiskEngine.qualify_portfolio_order from the same snapshot.price used
+    # for sizing. A code missing here (or mapped to <= 0.0) is treated by
+    # ExecutionGateway's never-market-orders chokepoint as "no valid limit
+    # price" -> hard reject, never a silent market-order fallback.
+    limit_prices: dict = field(default_factory=dict)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Microstructure signals (python/microstructure/signals/MicroSignal) — the
+# THIRD order-qualification shape. Unlike Strategy A/B, a microstructure
+# order always carries its own protective stop AND (usually) a target, so
+# RiskEngine emits both an entry order spec and an exit (stop-limit) spec in
+# one qualified object rather than leaving the exit to a separate signal.
+# ─────────────────────────────────────────────────────────────────────────────
+
+@dataclass
+class QualifiedMicroOrder:
+    raw: "object"                # the originating MicroSignal (typed loosely to avoid a
+                                  # python.core -> python.microstructure import edge)
+    qty: int
+    entry_limit_price: float     # marketable-limit entry price (never a market order)
+    stop_price: float            # protective stop trigger, submitted as the AUX price of a stop-limit
+    stop_limit_price: float      # protective stop's limit cap (stop_price offset by a small buffer)
+    target_price: Optional[float] = None   # take-profit limit order, if the signal supplied one
+    cancel_after_seconds: Optional[int] = None  # None = no auto-cancel (rely on TIF only)
+    gross_notional: float = 0.0
+    approved: bool = True
+    rejection_reason: Optional[str] = None
     metadata: dict = field(default_factory=dict)

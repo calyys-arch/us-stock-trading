@@ -5,6 +5,36 @@ wfo:
   min_oos_sharpe: 0.5
   max_oos_drawdown: 0.25
   min_pass_folds_ratio: 0.60
+  # Walk-forward window sizes for the self-improve loop
+  # (scripts/self_improve_loop.py). NOTE: walk_forward.py interprets these as
+  # CALENDAR days (timedelta), so 504 calendar days ~= 360 trading days.
+  is_days: 504
+  oos_days: 126
+  step_days: 126
+  # Per-strategy overrides (merged over the defaults above). Pairs needs a
+  # much longer in-sample window because run_pairs_backtest consumes the
+  # first coint_lookback_days (252 trading days) as pure warmup before the
+  # first trade can even trigger.
+  pairs_trading:
+    is_days: 1008
+  # Microstructure signals (docs/microstructure_pivot_plan.md §4c): 1-minute
+  # bars mean each trading day carries far more independent observations
+  # than one daily-bar row, so the walk-forward WINDOW itself can be much
+  # shorter than the daily strategies' — IS = 3 calendar months (~60 trading
+  # days), OOS = 1 month, step = 1 month, matching the plan's fold cadence
+  # over the ~12 months of 1m history python/data/intraday_cache backfills.
+  sweep_reclaim:
+    is_days: 90
+    oos_days: 30
+    step_days: 30
+  fvg_retest:
+    is_days: 90
+    oos_days: 30
+    step_days: 30
+  orb_vwap:
+    is_days: 90
+    oos_days: 30
+    step_days: 30
 
 monte_carlo:
   min_p5_sharpe: 0.0          # 5th-percentile bootstrap Sharpe must stay non-negative
@@ -20,3 +50,22 @@ live_promotion:
   # passed all of the above gates on the SAME backtest run before it may be
   # promoted out of observe-only mode.
   require_all_gates_pass: true
+  # Self-improve loop (python/backtest/promotion.py): candidate params are
+  # written back to configs/strategy.yaml only when their mean OOS Sharpe
+  # beats the CURRENT config's mean OOS Sharpe (same folds, same data) by at
+  # least this margin. 0.0 = any strict improvement qualifies.
+  min_oos_sharpe_improvement: 0.0
+
+# Additional gates for the microstructure signals ONLY (checked by
+# scripts/run_intraday_backtest.py on top of the shared wfo/monte_carlo/
+# reality_check/cost_gate blocks above) — docs/microstructure_pivot_plan.md
+# §4c. Rationale: intraday frequency means "enough calendar time" does not
+# guarantee "enough independent trades" the way it does for the daily
+# strategies, and intraday costs (spread + impact, paid twice per
+# round-trip) are the single biggest way a signal that looks profitable on
+# raw price action turns out not to be.
+intraday:
+  min_trades_per_oos_fold: 100        # a fold with fewer fills is not statistically
+                                       # meaningful even if is_days/oos_days look "long enough"
+  min_cost_adjusted_profit_factor: 1.3  # gross_profit / gross_loss AFTER slippage + commission
+  stress_slippage_multiplier: 2.0     # mandatory re-run at this multiplier; must stay net-profitable

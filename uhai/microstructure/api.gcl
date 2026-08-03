@@ -1,0 +1,89 @@
+// @expose / MCP surface for the microstructure event store (model.gcl).
+// Deployment: see model.gcl's header comment.
+
+@volatile
+type MicroEventInput {
+    subject: String;
+    predicate: String;
+    object_json: String;
+    source: String;
+    ts: time;
+}
+
+@volatile
+type MicroEventView {
+    subject: String;
+    predicate: String;
+    object_json: String;
+    source: String;
+    ts: time;
+}
+
+/// Bulk-ingest microstructure diagnostic events distilled from the
+/// us-stock-trading system (that repo's scripts/sync_uhai.py). NOT
+/// idempotent — re-running a sync for the same source data will append
+/// duplicate events; callers that need dedup should filter upstream (e.g.
+/// only sync since the last successful run).
+/// @param events One entry per (subject, predicate, object, source, ts)
+/// @returns Number of events ingested
+@expose
+@tag("mcp")
+fn ingestMicroEvents(events: Array<MicroEventInput>): int {
+    var count = 0;
+    for (_, input in events) {
+        var ev = node<MicroEvent> { MicroEvent {
+            subject: input.subject,
+            predicate: input.predicate,
+            object_json: input.object_json,
+            source: input.source,
+            ts: input.ts,
+        } };
+        events_by_time.setAt(input.ts, ev);
+
+        var bucket = events_by_subject.get(input.subject);
+        if (bucket == null) {
+            bucket = node<EventBucket> { EventBucket { items: nodeList<node<MicroEvent>> {} } };
+            events_by_subject.set(input.subject, bucket);
+        }
+        bucket->items.add(ev);
+        count = count + 1;
+    }
+    return count;
+}
+
+/// All events for one subject (e.g. "signal:sweep_reclaim"), oldest-first,
+/// optionally restricted to events at or after `since`.
+/// @param subject Exact subject string to match
+/// @param since Only events at or after this time (pass `0` for all history)
+@expose
+@tag("mcp")
+fn queryMicroEvents(subject: String, since: time): Array<MicroEventView> {
+    var out = Array<MicroEventView> {};
+    var bucket = events_by_subject.get(subject);
+    if (bucket == null) {
+        return out;
+    }
+    var n = bucket->items.size();
+    for (_, ev in bucket->items[0..n]) {
+        if (ev->ts < since) {
+            continue;
+        }
+        out.add(MicroEventView { subject: ev->subject, predicate: ev->predicate, object_json: ev->object_json, source: ev->source, ts: ev->ts });
+    }
+    return out;
+}
+
+/// Every distinct event timestamp in `[since, until]` — a cheap way for a
+/// dashboard/report to check "is there anything new" before paying for a
+/// full queryMicroEvents call.
+/// @param since Range start (inclusive)
+/// @param until Range end (inclusive)
+@expose
+@tag("mcp")
+fn countMicroEventsInRange(since: time, until: time): int {
+    var count = 0;
+    for (_, _ in events_by_time[since..until]) {
+        count = count + 1;
+    }
+    return count;
+}

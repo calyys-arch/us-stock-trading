@@ -4,13 +4,14 @@ interface Props {
   state: DashboardStateDto
 }
 
+/** Compact label/value rows, styled like IBKR TWS's Account window. */
 export default function StatCards({ state }: Props) {
   const netLiq = state.account_summary?.NetLiquidation
   const buyingPower = state.account_summary?.BuyingPower
   const openPairsCount = state.open_pairs.length
   const portfolioNames = Object.keys(state.latest_portfolio_weights || {}).length
 
-  const cards = [
+  const rows = [
     { label: 'Net Liquidation', value: netLiq !== undefined ? `$${netLiq.toLocaleString()}` : '—' },
     { label: 'Buying Power', value: buyingPower !== undefined ? `$${buyingPower.toLocaleString()}` : '—' },
     { label: 'Open Pairs', value: String(openPairsCount) },
@@ -19,11 +20,17 @@ export default function StatCards({ state }: Props) {
   ]
 
   return (
-    <div style={{ display: 'grid', gridTemplateColumns: `repeat(${cards.length}, 1fr)`, gap: 12 }}>
-      {cards.map((c) => (
-        <div className="panel" key={c.label}>
-          <div style={{ fontSize: 11, color: 'var(--text-dim)', textTransform: 'uppercase', marginBottom: 6 }}>{c.label}</div>
-          <div style={{ fontSize: 20, fontWeight: 700 }}>{c.value}</div>
+    <div>
+      {rows.map((r, i) => (
+        <div
+          key={r.label}
+          style={{
+            display: 'flex', justifyContent: 'space-between', alignItems: 'baseline',
+            padding: '7px 2px', borderBottom: i < rows.length - 1 ? '1px solid var(--border)' : 'none',
+          }}
+        >
+          <span style={{ fontSize: 11, color: 'var(--text-dim)' }}>{r.label}</span>
+          <span className="num" style={{ fontSize: 14, fontWeight: 700 }}>{r.value}</span>
         </div>
       ))}
     </div>

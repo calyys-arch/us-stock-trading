@@ -24,6 +24,57 @@ xsection_mean_reversion:
   auto_execute: false
   lookback_days: 1
   gross_leverage_target: 1.0
-  min_universe_size: 20
+  min_universe_size: 15    # fixed top-20 universe (configs/universe.yaml) minus up to 5
+                           # names with missing bars on a given day (halts, late IPOs)
   allow_overnight: false         # confirmed constraint: intraday only, flatten by close
   flatten_buffer_minutes: 5      # flatten window before the 16:00 ET close
+
+# Microstructure signals (docs/microstructure_pivot_plan.md). Report-only by
+# construction right now: python/backtest/intraday_engine.py and
+# scripts/run_intraday_backtest.py exist for BACKTESTING these, but nothing
+# in the live dashboard/engine loop calls them yet (that is Phase 2 of the
+# plan, "訊號迴路真正接上 dashboard") — auto_execute stays false until each
+# one has an actual WFO/MC/reality-check/2x-stress GO decision on file.
+
+sweep_reclaim:
+  enabled: true
+  auto_execute: false
+  sweep_min_atr: 0.15         # sweep must clear the level by >= this many ATRs
+  reclaim_bars: 3              # must reclaim back inside the level within this many bars
+  stop_atr_mult: 0.25          # stop placed this many ATRs beyond the sweep extreme
+  allow_overnight: false
+  flatten_buffer_minutes: 5
+
+fvg_retest:
+  enabled: true
+  auto_execute: false
+  vol_mult: 2.0                # impulse bar volume must exceed this x the 20-bar average
+  entry_pct: 0.5                # limit order placed at this fraction into the gap (0.5 = midpoint)
+  expiry_bars: 10               # cancel the resting limit order after this many bars unfilled
+  allow_overnight: false
+  flatten_buffer_minutes: 5
+
+orb_vwap:
+  enabled: true
+  auto_execute: false
+  or_minutes: 15                # opening-range window length
+  vwap_side_filter: true        # require close on the same side of session VWAP as the breakout
+  allow_overnight: false
+  flatten_buffer_minutes: 5
+
+# S4 — L2 Absorption/Iceberg (Phase 3, docs/microstructure_pivot_plan.md §1).
+# BAR-ONLY PROXY (see python/microstructure/signals/l2_absorption.py's module
+# docstring): no real L2 depth confirmation yet. `enabled: true` here only
+# controls dashboard chart-overlay detection (dashboard/app.py's
+# /api/chart/{symbol}/context) — this signal is DELIBERATELY NOT in
+# scripts/run_intraday_backtest.py's SIGNALS list, so it can never earn a
+# WFO "GO"/get promoted; `auto_execute` staying false is not the only
+# safety net here, it genuinely cannot be backtested for real yet.
+l2_absorption:
+  enabled: true
+  auto_execute: false
+  volume_mult: 3.0               # bar volume must exceed this x the 20-bar average to count as "absorption"
+  touch_atr_mult: 0.25           # how close (in ATR) the bar's low/high must sit to the tested level
+  stop_atr_mult: 0.5             # stop placed this many ATRs beyond the defended level
+  allow_overnight: false
+  flatten_buffer_minutes: 5

@@ -21,18 +21,30 @@ and standard Reg T / FINRA rules:
   - Short-sale locate requirement: no short leg is approved without
     `short_locate_available=True` on the snapshot (hard-to-borrow names are
     rejected outright rather than silently downsized).
+  - Marketable-limit pricing (user decision, 2026-07-29): every qualify_*
+    method computes a bounded limit price from snapshot.price +/-
+    `limit_price_buffer_bps`, NEVER leaves price selection to a market
+    order — "control exact execution price, avoid PFOF-routed market
+    orders" is enforced end-to-end, with ExecutionGateway._submit_order as
+    the final chokepoint that refuses to submit anything without one.
+  - Daily loss kill-switch (`DailyLossTracker`) and event blackout windows
+    (`python/core/event_blackout.py`) for the intraday microstructure
+    signals (qualify_microstructure_order) — Chan's book has no equivalent
+    for the daily strategies because they don't compound risk within a
+    session the way 1-minute signals do.
 """
 from __future__ import annotations
 
 import logging
 from collections import deque
-from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from dataclasses import dataclass, field, fields
+from datetime import date, datetime, timedelta
 from typing import Optional
 
 from .types import (
     MarketSnapshot,
     PortfolioTarget,
+    QualifiedMicroOrder,
     QualifiedPortfolioOrder,
     QualifiedSpreadOrder,
     SpreadSide,
@@ -54,6 +66,104 @@ class RiskConfig:
     kelly_multiplier: float = 0.5                  # half-Kelly (Chan p.70)
     require_short_locate: bool = True
     min_price: float = 5.0                         # Chan Ch.5: exclude sub-$5 stocks
+
+    # ── Order-type / execution-price controls (user decision, 2026-07-29:
+    # always Limit/Stop-Limit, never Market — control exact execution price,
+    # avoid PFOF-routed market-order fills) ──────────────────────────────────
+    limit_price_buffer_bps: float = 10.0           # 0.10% marketable-limit buffer, entries
+    flatten_limit_buffer_bps: float = 25.0         # wider buffer for urgent flatten/exit orders
+    stop_limit_buffer_bps: float = 15.0            # stop trigger -> limit cap offset (protective exits)
+
+    # ── Intraday microstructure signal controls (qualify_microstructure_order) ─
+    micro_risk_per_trade_pct: float = 0.01         # 1% account risk per trade (stop-distance sizing)
+    max_intraday_notional_pct: float = 0.05        # per-position cap, pct of account equity
+    max_open_micro_positions: int = 5
+    max_daily_loss_pct: float = 0.02               # kill-switch: halt new micro entries for the day
+    event_blackout_minutes: int = 30               # +/- window around earnings/8-K/econ events
+    micro_cancel_after_seconds: int = 60           # auto-cancel an unfilled entry limit after this long
+
+
+RISK_CONFIG_PATH = "configs/risk.yaml"
+
+
+def load_risk_config(path: str = RISK_CONFIG_PATH) -> RiskConfig:
+    """RiskConfig built from configs/risk.yaml — the loader that actually
+    makes that file's keys load-bearing (forex lesson #2: a config key with
+    no reading code is worse than no config key at all). Unknown keys in
+    the yaml (e.g. `max_gross_leverage`, `min_gross_to_cost_ratio` — read
+    elsewhere, not by this dataclass) are ignored here rather than raising,
+    since this loader's only job is RiskConfig's own fields. Falls back to
+    RiskConfig()'s hardcoded defaults (with a warning) if the file is
+    missing or unparseable — a live/paper run must never silently run with
+    a HALF-loaded risk config."""
+    import yaml
+
+    try:
+        with open(path, encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
+    except Exception as exc:
+        log.warning("load_risk_config: could not read %s (%s) — using hardcoded RiskConfig() defaults", path, exc)
+        return RiskConfig()
+
+    known_fields = {f.name for f in fields(RiskConfig)}
+    filtered = {k: v for k, v in raw.items() if k in known_fields}
+    ignored = set(raw) - known_fields
+    if ignored:
+        log.debug("load_risk_config: ignoring %s keys not on RiskConfig (%s)", path, sorted(ignored))
+    return RiskConfig(**filtered)
+
+
+def marketable_limit_price(price: float, side: str, buffer_bps: float) -> float:
+    """A limit price that is aggressive enough to have a high fill
+    probability against the current price while still capping the WORST
+    price the order can execute at — the whole point of "never a market
+    order": buy limits sit `buffer_bps` ABOVE price, sell limits sit
+    `buffer_bps` BELOW it. Returns 0.0 (never a negative/zero-buffer price)
+    when `price` isn't positive, which callers must treat as "no valid
+    limit price" (see QualifiedSpreadOrder/QualifiedPortfolioOrder
+    docstrings) rather than silently falling back to a market order."""
+    if price <= 0:
+        return 0.0
+    buffer = buffer_bps / 10_000.0
+    is_buy = side.lower() == "buy"
+    return round(price * (1 + buffer) if is_buy else price * (1 - buffer), 2)
+
+
+class DailyLossTracker:
+    """Tracks realized+unrealized P&L for the CURRENT trading session only
+    (resets on date change, not a rolling window like PDTTracker) — the
+    daily-loss kill-switch for intraday microstructure signals. Chan's book
+    has no equivalent for the daily strategies (they don't compound
+    intraday risk the way repeated 1-minute entries do), so this is scoped
+    to qualify_microstructure_order only."""
+
+    def __init__(self) -> None:
+        self._session_date: Optional[date] = None
+        self._pnl: float = 0.0
+
+    def _roll_session(self, now: datetime) -> None:
+        today = now.date()
+        if self._session_date != today:
+            self._session_date = today
+            self._pnl = 0.0
+
+    def record_pnl(self, now: datetime, pnl_delta: float) -> None:
+        self._roll_session(now)
+        self._pnl += pnl_delta
+
+    def session_pnl(self, now: datetime) -> float:
+        self._roll_session(now)
+        return self._pnl
+
+    def kill_switch_triggered(self, now: datetime, account_equity: float, cfg: RiskConfig) -> bool:
+        """True once today's loss exceeds `cfg.max_daily_loss_pct` of
+        `account_equity` — callers (qualify_microstructure_order) must
+        reject every NEW entry once this is true, though existing positions
+        may still be closed (that's ExecutionGateway.flatten_*'s job, not
+        this check's)."""
+        if account_equity <= 0:
+            return False
+        return self.session_pnl(now) <= -abs(cfg.max_daily_loss_pct) * account_equity
 
 
 class PDTTracker:
@@ -86,6 +196,7 @@ class RiskEngine:
     def __init__(self, config: RiskConfig | None = None) -> None:
         self.cfg = config or RiskConfig()
         self.pdt = PDTTracker()
+        self.daily_loss = DailyLossTracker()
 
     # ── Strategy A: pairs spread orders ─────────────────────────────────────
 
@@ -138,6 +249,8 @@ class RiskEngine:
             kelly_fraction_used=capped_fraction,
             approved=rejection is None,
             rejection_reason=rejection,
+            limit_price_a=marketable_limit_price(snapshot_a.price, signal.entry_side_a, self.cfg.limit_price_buffer_bps),
+            limit_price_b=marketable_limit_price(snapshot_b.price, signal.entry_side_b, self.cfg.limit_price_buffer_bps),
         )
 
     # ── Strategy B: cross-sectional portfolio target ────────────────────────
@@ -162,6 +275,7 @@ class RiskEngine:
 
         sector_exposure: dict[str, float] = {}
         target_shares: dict[str, int] = {}
+        limit_prices: dict[str, float] = {}
         rejected: dict[str, str] = {}
         gross_notional = 0.0
 
@@ -198,6 +312,9 @@ class RiskEngine:
 
             signed_shares = shares if weight > 0 else -shares
             target_shares[code] = signed_shares
+            limit_prices[code] = marketable_limit_price(
+                snap.price, "buy" if weight > 0 else "sell", self.cfg.limit_price_buffer_bps,
+            )
             gross_notional += shares * snap.price
 
         if target_shares:
@@ -211,6 +328,80 @@ class RiskEngine:
             estimated_cost=0.0,
             kelly_fraction_used=self.cfg.kelly_multiplier,
             approved=bool(target_shares),
+            limit_prices=limit_prices,
+        )
+
+    # ── Microstructure signals (python/microstructure/signals.MicroSignal) ──
+
+    def qualify_microstructure_order(
+        self,
+        signal,                          # MicroSignal (loosely typed — see QualifiedMicroOrder)
+        snapshot: MarketSnapshot,
+        account_equity: float,
+        open_micro_positions: int,
+        event_blackout: Optional[bool] = None,
+        now: Optional[datetime] = None,
+    ) -> QualifiedMicroOrder:
+        """Position-size + qualify one intraday MicroSignal. Unlike
+        qualify_spread_order/qualify_portfolio_order, this ALWAYS attaches a
+        protective stop-limit spec (stop_price/stop_limit_price) because
+        every microstructure signal carries its own stop by construction
+        (python/microstructure/signals.MicroSignal.stop_price) — there is no
+        equivalent "spread-based exit" concept to fall back on here.
+
+        `event_blackout`: True/False from python/core/event_blackout.py's
+        is_event_blackout(); None is treated as "evidence unavailable" and
+        does NOT block the order (same three-valued-evidence convention as
+        python/signals/trap_detector.py, but here the caller is expected to
+        have actually checked — passing None because you forgot to call the
+        checker is a caller bug, not a legitimate "unknown" state)."""
+        now = now or signal.signal_time
+        rejection: Optional[str] = None
+
+        if self.daily_loss.kill_switch_triggered(now, account_equity, self.cfg):
+            rejection = "daily_loss_kill_switch"
+        elif event_blackout:
+            rejection = "event_blackout"
+        elif open_micro_positions >= self.cfg.max_open_micro_positions:
+            rejection = "max_open_micro_positions"
+        elif not snapshot.is_tradeable:
+            rejection = "snapshot_not_tradeable"
+        elif not snapshot.is_regular_trading_hours:
+            rejection = "outside_rth"
+
+        entry_price = signal.entry_price
+        stop_price = signal.stop_price
+        stop_dist = abs(entry_price - stop_price)
+        qty = 0
+        if stop_dist > 0 and entry_price > 0 and account_equity > 0:
+            risk_dollars = account_equity * self.cfg.micro_risk_per_trade_pct
+            shares_by_risk = risk_dollars / stop_dist
+            shares_by_notional = (account_equity * self.cfg.max_intraday_notional_pct) / entry_price
+            qty = max(int(min(shares_by_risk, shares_by_notional)), 0)
+
+        if rejection is None and qty <= 0:
+            rejection = "size_rounded_to_zero"
+
+        entry_side = "buy" if signal.direction == "long" else "sell"
+        exit_side = "sell" if signal.direction == "long" else "buy"
+        entry_limit = marketable_limit_price(entry_price, entry_side, self.cfg.limit_price_buffer_bps)
+        # The protective stop's LIMIT cap sits a further buffer beyond the
+        # trigger, in the direction the stop is already moving against us —
+        # a stop-limit with limit==stop can fail to fill entirely in a fast
+        # move, which defeats the point of a protective stop.
+        stop_limit = marketable_limit_price(stop_price, exit_side, self.cfg.stop_limit_buffer_bps)
+
+        return QualifiedMicroOrder(
+            raw=signal,
+            qty=qty,
+            entry_limit_price=entry_limit,
+            stop_price=stop_price,
+            stop_limit_price=stop_limit,
+            target_price=signal.target_price,
+            cancel_after_seconds=self.cfg.micro_cancel_after_seconds,
+            gross_notional=qty * entry_price,
+            approved=rejection is None,
+            rejection_reason=rejection,
         )
 
     # ── Reg T leverage check (used by execution_gateway before submission) ──

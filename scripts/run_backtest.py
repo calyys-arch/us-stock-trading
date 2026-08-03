@@ -1,7 +1,7 @@
 """
 End-to-end backtest runner: fetch data -> run strategy backtest -> Monte
 Carlo -> Reality Check -> Walk-Forward -> apply configs/goal.yaml acceptance
-gates -> write docs/us_equity_health_check.md.
+gates -> write backtests/reports/us_equity_health_check.md.
 
 Usage:
     # Cross-sectional strategy, real yfinance data (needs network + point-in-time universe)
@@ -124,27 +124,42 @@ def run_xsection(args) -> dict:
     if args.demo:
         panel = _synthetic_panel()
         data_label = "SYNTHETIC DEMO DATA — not a real market backtest"
+        codes = sorted(panel.index.get_level_values(1).unique())
+        dates = sorted(panel.index.get_level_values(0).unique())[30:]
+        universe_by_day = {d: codes for d in dates}
     else:
-        from python.data.sp500_universe import universe_by_day as build_universe
-        from python.simulation.hist_data_us import build_price_panel
+        from python.data.fixed_universe import load_universe_config
+        from python.data.price_cache import get_cached_price_panel
 
-        universe_dates = pd.bdate_range(args.start, args.end)
-        universe = build_universe(list(universe_dates))
-        symbols = sorted({c for codes in universe.values() for c in codes})
-        panel, quality_flags = build_price_panel(symbols, args.start, args.end)
-        data_label = f"Live yfinance data, {len(symbols)} symbols (point-in-time S&P 500, Wikipedia-derived)"
+        # Fixed top-N-by-dollar-volume universe (user-confirmed design
+        # decision, 2026-07-28) — replaces the per-day liquidity re-rank so
+        # that self-improve loop iterations are comparable (parameter
+        # changes are the ONLY thing varying between runs). Build/refresh
+        # the list with scripts/refresh_universe.py; see
+        # python/data/fixed_universe.py for the survivorship caveat.
+        universe_cfg = load_universe_config()
+        symbols = universe_cfg["symbols"]
+        panel, quality_flags, cache_meta = get_cached_price_panel(
+            symbols, args.start, args.end, refresh=args.refresh_data)
+        sources = "+".join(sorted(cache_meta["sources"]))
+        data_label = (
+            f"Fixed top-{universe_cfg['top_n']} dollar-volume universe "
+            f"(configs/universe.yaml, computed_at={universe_cfg['computed_at']}, "
+            f"{universe_cfg['ranking_metric']}), daily bars via local price cache "
+            f"({sources})"
+        )
         if quality_flags:
             print(f"WARNING: data-quality flags on {len(quality_flags)} symbols — see report")
+
+        dates = sorted(panel.index.get_level_values(0).unique())[30:]
+        universe_by_day = {d: list(symbols) for d in dates}
+        codes = list(symbols)
 
     strategy = CrossSectionalMeanReversionStrategy(
         lookback_days=strat_cfg["lookback_days"],
         gross_leverage_target=strat_cfg["gross_leverage_target"],
         min_universe_size=strat_cfg["min_universe_size"],
     )
-
-    codes = sorted(panel.index.get_level_values(1).unique())
-    dates = sorted(panel.index.get_level_values(0).unique())[30:]
-    universe_by_day = {d: codes for d in dates}
 
     n_trading_days = len(dates)
     sample_ok = sufficient_sample_size(n_trading_days, n_params)
@@ -184,6 +199,10 @@ def run_xsection(args) -> dict:
         "reality_check": rc_result.to_dict(),
         "gates": gates,
         "overall_pass": all(gates.values()),
+        # Internal (popped before report writing): inputs for the
+        # report-only signal-trap diagnostic layer.
+        "_trap_targets_by_day": result.targets_by_day,
+        "_trap_panel": panel,
     }
 
 
@@ -234,13 +253,20 @@ def run_pairs(args) -> dict:
         prices_a, prices_b = _synthetic_pair()
         code_a, code_b = "SYNA", "SYNB"
         data_label = "SYNTHETIC DEMO DATA (genuinely cointegrated by construction)"
+        # close-only frames: trap sub-scores that need OHLCV report "unavailable"
+        ohlcv_by_symbol = {code_a: prices_a.rename("close").to_frame(),
+                           code_b: prices_b.rename("close").to_frame()}
     else:
-        from python.simulation.hist_data_us import fetch_daily_bars
+        from python.data.price_cache import get_cached_price_panel
 
-        code_a, code_b = args.pair_a, args.pair_b
-        prices_a = fetch_daily_bars(code_a, args.start, args.end)["close"]
-        prices_b = fetch_daily_bars(code_b, args.start, args.end)["close"]
-        data_label = f"Live yfinance data: {code_a} / {code_b}"
+        code_a, code_b = args.pair_a.upper(), args.pair_b.upper()
+        pair_panel, _pair_flags, pair_meta = get_cached_price_panel(
+            [code_a, code_b], args.start, args.end, refresh=args.refresh_data)
+        ohlcv_by_symbol = {c: pair_panel.xs(c, level=1) for c in (code_a, code_b)}
+        prices_a = ohlcv_by_symbol[code_a]["close"]
+        prices_b = ohlcv_by_symbol[code_b]["close"]
+        sources = "+".join(sorted(pair_meta["sources"]))
+        data_label = f"{code_a} / {code_b} daily bars via local price cache ({sources})"
 
     quality_a = quality_report(prices_a)
     quality_b = quality_report(prices_b)
@@ -288,21 +314,28 @@ def run_pairs(args) -> dict:
         "data_quality_b": quality_b,
         "gates": gates,
         "overall_pass": all(gates.values()),
+        # Internal (popped before report writing): inputs for the
+        # report-only signal-trap diagnostic layer.
+        "_trap_trades": report.trades,
+        "_trap_panel_by_symbol": ohlcv_by_symbol,
     }
 
 
 def write_health_check(results: list[dict]) -> Path:
-    out_path = Path("docs/us_equity_health_check.md")
+    out_path = Path("backtests/reports/us_equity_health_check.md")
     lines = [
         "# US Equity Strategy Health Check",
         "",
         f"Generated: {datetime.now(timezone.utc).isoformat()}",
         "",
         "> **Disclaimer**: backtests using `--demo` mode use synthetic data and validate",
-        "> PIPELINE CORRECTNESS only, not strategy edge. Backtests using real data rely on",
-        "> yfinance + a Wikipedia-derived point-in-time S&P 500 universe — see",
-        "> README.md 'Known limitations (MVP)' before trusting these numbers for capital",
-        "> allocation decisions.",
+        "> PIPELINE CORRECTNESS only, not strategy edge. Backtests using real data use the",
+        "> FIXED top-N dollar-volume universe from configs/universe.yaml (built by",
+        "> scripts/refresh_universe.py — one liquidity snapshot applied across time, which",
+        "> carries a mild survivorship flavor documented in python/data/fixed_universe.py)",
+        "> and daily bars from the local price cache (IB Gateway ADJUSTED_LAST, yfinance",
+        "> fallback — the Data line above names the actual source). See README.md 'Known",
+        "> limitations (MVP)' before trusting these numbers for capital allocation decisions.",
         "",
     ]
     for r in results:
@@ -312,8 +345,9 @@ def write_health_check(results: list[dict]) -> Path:
         lines.append(f"- Free parameters: {r['n_free_parameters']} (Chan Ch.3 ceiling: 5)")
         lines.append(f"- Trading days tested: {r['n_trading_days']}")
         for k, v in r.items():
-            if k in ("strategy", "data_label", "n_free_parameters", "n_trading_days", "gates",
-                      "monte_carlo", "reality_check", "data_quality_a", "data_quality_b", "overall_pass"):
+            if k.startswith("_") or k in (
+                    "strategy", "data_label", "n_free_parameters", "n_trading_days", "gates",
+                    "monte_carlo", "reality_check", "data_quality_a", "data_quality_b", "overall_pass"):
                 continue
             lines.append(f"- {k}: {v}")
         lines.append("")
@@ -324,6 +358,7 @@ def write_health_check(results: list[dict]) -> Path:
         lines.append(f"**Overall: {'PASS' if r['overall_pass'] else 'NO-GO'}**")
         lines.append("")
 
+    out_path.parent.mkdir(parents=True, exist_ok=True)
     out_path.write_text("\n".join(lines), encoding="utf-8")
     return out_path
 
@@ -336,6 +371,11 @@ def main() -> None:
     parser.add_argument("--end", default="2025-01-01")
     parser.add_argument("--pair-a", default="XLE")
     parser.add_argument("--pair-b", default="XOP")
+    parser.add_argument("--refresh-data", action="store_true",
+                         help="force re-fetch of locally cached price data (data/history/)")
+    parser.add_argument("--skip-trap-report", action="store_true",
+                         help="skip the report-only signal-trap diagnostics "
+                              "(backtests/reports/signal_trap_report.md)")
     args = parser.parse_args()
 
     results = []
@@ -346,10 +386,60 @@ def main() -> None:
         print("Running pairs_trading backtest...")
         results.append(run_pairs(args))
 
+    if not args.skip_trap_report:
+        try:
+            trap_path = write_trap_report(results, args)
+            if trap_path is not None:
+                print(f"Signal trap report written to {trap_path}")
+        except Exception:
+            logging.getLogger(__name__).exception(
+                "signal-trap report generation failed (report-only layer — backtest results unaffected)")
+
+    # Internal trap-layer payloads must never leak into the health check.
+    for r in results:
+        for key in [k for k in r if k.startswith("_")]:
+            r.pop(key)
+
     out_path = write_health_check(results)
     print(f"\nHealth check written to {out_path}")
     for r in results:
         print(f"  {r['strategy']}: {'PASS' if r['overall_pass'] else 'NO-GO'}")
+
+
+def write_trap_report(results: list[dict], args):
+    """Assemble signal specs from both strategies' backtest outputs and hand
+    them to the report-only diagnostic layer (python/signals/trap_report.py).
+    Never raises into the caller's happy path — diagnostics must not break
+    the backtest."""
+    from python.signals.trap_report import (
+        build_trap_report,
+        collect_pairs_assessments,
+        collect_xsection_assessments,
+    )
+
+    signal_specs = []
+    panel_by_symbol: dict = {}
+    data_labels = []
+    for r in results:
+        data_labels.append(f"{r['strategy']}: {r['data_label']}")
+        if "_trap_trades" in r:
+            pair_panels = r["_trap_panel_by_symbol"]
+            panel_by_symbol.update(pair_panels)
+            signal_specs.extend(collect_pairs_assessments(r["_trap_trades"], pair_panels))
+        if "_trap_targets_by_day" in r:
+            panel = r["_trap_panel"]
+            for code in panel.index.get_level_values(1).unique():
+                panel_by_symbol.setdefault(code, panel.xs(code, level=1))
+            signal_specs.extend(collect_xsection_assessments(r["_trap_targets_by_day"]))
+
+    if not signal_specs:
+        print("No signals to assess — skipping trap report")
+        return None
+    return build_trap_report(
+        signal_specs, panel_by_symbol,
+        start=pd.Timestamp(args.start), end=pd.Timestamp(args.end),
+        data_label=" | ".join(data_labels),
+    )
 
 
 if __name__ == "__main__":

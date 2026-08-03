@@ -36,7 +36,7 @@ def flag_extreme_moves(
 def quality_report(prices: pd.Series, sigma_threshold: float = 4.0) -> dict:
     """Summarize data-quality findings for one instrument's price series.
     Intended for use in scripts/run_backtest.py pre-flight checks and
-    docs/us_equity_health_check.md generation."""
+    backtests/reports/us_equity_health_check.md generation."""
     returns = prices.pct_change().dropna()
     flagged = flag_extreme_moves(returns, sigma_threshold=sigma_threshold)
     n_flagged = int(flagged.sum())

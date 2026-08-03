@@ -23,3 +23,20 @@ min_price: 5.0                      # Chan Ch.5: exclude sub-$5 stocks
 # Acceptance gate (forex lesson #4: transaction costs dominated gross edge
 # in every one of 9 forex strategies except a thin slice of one).
 min_gross_to_cost_ratio: 2.0        # gross expectancy must be >= 2x round-trip cost
+
+# Order-type / execution-price controls (user decision, 2026-07-29: always
+# Limit/Stop-Limit, never Market — control exact execution price, avoid
+# PFOF-routed market-order fills). Enforced at python/core/execution_gateway
+# .py's ExecutionGateway._submit_order chokepoint, the only place in that
+# class allowed to call broker.place_order.
+limit_price_buffer_bps: 10.0         # 0.10% marketable-limit buffer, fresh entries
+flatten_limit_buffer_bps: 25.0       # wider buffer for urgent flatten/exit orders
+stop_limit_buffer_bps: 15.0          # stop trigger -> limit cap offset, protective exits
+
+# Intraday microstructure signal controls (RiskEngine.qualify_microstructure_order)
+micro_risk_per_trade_pct: 0.01       # 1% account risk per trade, stop-distance sizing
+max_intraday_notional_pct: 0.05      # per-position cap, pct of account equity
+max_open_micro_positions: 5
+max_daily_loss_pct: 0.02             # daily-loss kill-switch: halt new micro entries for the day
+event_blackout_minutes: 30           # +/- window around earnings/8-K/econ events (see python/core/event_blackout.py)
+micro_cancel_after_seconds: 60       # auto-cancel an unfilled entry limit after this long

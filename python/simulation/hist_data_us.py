@@ -89,7 +89,7 @@ def build_price_panel(
     volume, adv_20d_dollars]. Returns (panel, quality_reports) where
     quality_reports = {symbol: quality_report_dict} for any symbol with >= 1
     flagged extreme move — callers should surface these in
-    docs/us_equity_health_check.md rather than silently trusting the data.
+    backtests/reports/us_equity_health_check.md rather than silently trusting the data.
     """
     frames = []
     quality_flags: dict = {}

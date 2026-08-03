@@ -1,0 +1,39 @@
+// Semantic-event store for the us-stock-trading system's microstructure
+// diagnostic layer. Stores DISTILLED events only — WFO/gate decisions,
+// promotion outcomes, universe snapshots, trap-detector summaries — never
+// raw 1-minute bars or tick/L2 data (those stay in the trading repo's own
+// Parquet cache / data/ticks / data/depth). See that repo's
+// docs/microstructure_pivot_plan.md and scripts/sync_uhai.py for the
+// "distill first, then graph" rationale (Parquet for volume, GreyCat's
+// triple store for meaning/relationships).
+//
+// Deployment: copy this `microstructure/` folder into your UHAI project as
+// `src/microstructure/` (alongside the existing `src/trading_signals/`
+// pack) and add `@include("src/microstructure");` to project.gcl.
+
+/// One (subject, predicate, object) semantic event. `object_json` carries
+/// the actual payload (decision, gate results, parameter set, ...) as a
+/// JSON string rather than a rigid schema, because the upstream trading
+/// system's report shapes evolve — a graph node breaking every time a new
+/// gate is added would defeat the point of syncing here at all.
+type MicroEvent {
+    subject: String;      // e.g. "signal:sweep_reclaim", "universe:top20_tech"
+    predicate: String;    // e.g. "hasBacktestResult", "hasParameterSet", "asOf"
+    object_json: String;  // JSON-encoded object payload
+    source: String;       // originating script/report, e.g. "run_intraday_backtest.py"
+    ts: time;             // event timestamp (UTC, microseconds)
+}
+
+/// One subject's events, oldest-first. A thin wrapper (rather than a bare
+/// `nodeList<node<MicroEvent>>` module variable) because nodeIndex values
+/// must be `node<V>`, not a node-collection type directly.
+type EventBucket {
+    items: nodeList<node<MicroEvent>>;
+}
+
+// All events, time-indexed for range queries ("what happened last week").
+var events_by_time: nodeTime<node<MicroEvent>>;
+
+// Secondary index: subject -> its own event history, for "show me
+// everything about sweep_reclaim" lookups without a full time-range scan.
+var events_by_subject: nodeIndex<String, node<EventBucket>>;

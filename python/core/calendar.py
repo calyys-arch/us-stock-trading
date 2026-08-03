@@ -37,9 +37,31 @@ def _xnys():
         return None
 
 
+def _to_et(dt: datetime) -> datetime:
+    """Timezone-naive datetimes represent ET wall-clock time throughout
+    this live pipeline (python/interfaces/market_data.py's SimulatedFeed
+    virtual clock starts at 09:30 to mean 09:30 ET;
+    python/microstructure/context.py's whole bar-index convention is a
+    tz-naive ET DatetimeIndex — see that module's docstring; a MicroSignal
+    built from those bars therefore carries a tz-naive `signal_time` too).
+    `.replace(tzinfo=...)` ATTACHES ET without converting the wall-clock
+    value, which is exactly what "this naive value already IS ET" means —
+    unlike `.astimezone()`, which (a) assumes the *server's local*
+    timezone for naive stdlib datetimes (silently wrong on a non-ET host)
+    and (b) raises TypeError outright for a naive `pandas.Timestamp`
+    (pandas is stricter here than stdlib datetime), which crashed
+    ExecutionGateway._on_microstructure_order the first time a live
+    microstructure signal actually reached it. Timezone-AWARE datetimes
+    (every real IBKR tick — always UTC, see python/interfaces/ibkr_feed.py)
+    are still correctly CONVERTED to ET as before."""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=_ET)
+    return dt.astimezone(_ET)
+
+
 def is_trading_day(dt: datetime) -> bool:
     cal = _xnys()
-    d = dt.astimezone(_ET).date()
+    d = _to_et(dt).date()
     if cal is not None:
         return bool(cal.is_session(d.isoformat()))
     # Fallback (exchange_calendars not installed): weekday-only, no holidays.
@@ -53,7 +75,7 @@ def session_open_close(dt: datetime) -> tuple[datetime, datetime] | None:
     or None if `dt`'s date is not a trading day. Accounts for early closes
     (e.g. day after Thanksgiving) via exchange_calendars when available."""
     cal = _xnys()
-    d = dt.astimezone(_ET).date()
+    d = _to_et(dt).date()
     if cal is not None:
         if not cal.is_session(d.isoformat()):
             return None
@@ -72,7 +94,7 @@ def is_regular_trading_hours(dt: datetime) -> bool:
     if session is None:
         return False
     open_et, close_et = session
-    now_et = dt.astimezone(_ET)
+    now_et = _to_et(dt)
     return open_et <= now_et < close_et
 
 
@@ -83,13 +105,13 @@ def is_intraday_flatten_window(dt: datetime) -> bool:
     if session is None:
         return False
     _, close_et = session
-    now_et = dt.astimezone(_ET)
+    now_et = _to_et(dt)
     return (close_et - _INTRADAY_FLATTEN_BUFFER) <= now_et < close_et
 
 
 def next_trading_day(dt: datetime) -> datetime:
     cal = _xnys()
-    d = dt.astimezone(_ET).date()
+    d = _to_et(dt).date()
     if cal is not None:
         nxt = cal.next_session(d.isoformat())
         return nxt.to_pydatetime().astimezone(_ET)

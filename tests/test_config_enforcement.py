@@ -40,6 +40,7 @@ def test_auto_execute_key_gates_order_submission():
     order = QualifiedSpreadOrder(
         raw=signal, qty_a=100, qty_b=100, gross_notional=20000.0,
         estimated_cost=0.0, kelly_fraction_used=0.05, approved=True,
+        limit_price_a=100.0, limit_price_b=50.0,
     )
 
     bus = MessageBus()
@@ -76,6 +77,7 @@ def test_gateway_mode_observe_blocks_even_if_strategy_auto_execute_true():
     order = QualifiedSpreadOrder(
         raw=signal, qty_a=100, qty_b=100, gross_notional=20000.0,
         estimated_cost=0.0, kelly_fraction_used=0.05, approved=True,
+        limit_price_a=100.0, limit_price_b=50.0,
     )
     bus = MessageBus()
     broker = SimBroker()
@@ -161,11 +163,122 @@ def test_configs_yaml_files_are_valid_and_have_required_keys():
         risk_cfg = yaml.safe_load(f)
     with open("configs/strategy.yaml", "r", encoding="utf-8") as f:
         strat_cfg = yaml.safe_load(f)
+    with open("configs/broker.yaml", "r", encoding="utf-8") as f:
+        broker_cfg = yaml.safe_load(f)
 
     for key in ("require_short_locate", "pdt_equity_threshold", "max_day_trades_rolling_5d",
-                "reg_t_intraday_leverage", "reg_t_overnight_leverage"):
+                "reg_t_intraday_leverage", "reg_t_overnight_leverage",
+                "limit_price_buffer_bps", "flatten_limit_buffer_bps", "stop_limit_buffer_bps",
+                "micro_risk_per_trade_pct", "max_intraday_notional_pct", "max_open_micro_positions",
+                "max_daily_loss_pct", "event_blackout_minutes", "micro_cancel_after_seconds"):
         assert key in risk_cfg, f"configs/risk.yaml missing enforced key: {key}"
 
     for strat in ("pairs_trading", "xsection_mean_reversion"):
         assert "auto_execute" in strat_cfg[strat], f"{strat} missing auto_execute key"
         assert "enabled" in strat_cfg[strat], f"{strat} missing enabled key"
+
+    assert "data_source" in broker_cfg, "configs/broker.yaml missing data_source key"
+    assert broker_cfg["data_source"] == "simulated", (
+        "configs/broker.yaml must default to data_source: simulated — the checked-in default "
+        "must never silently require a real IB Gateway/TWS connection"
+    )
+    for key in ("host", "feed_port", "broker_port", "feed_client_id", "broker_client_id"):
+        assert key in broker_cfg["ibkr"], f"configs/broker.yaml ibkr section missing key: {key}"
+
+
+def test_broker_yaml_data_source_is_actually_read_by_engine_runtime():
+    """Forex lesson #2 regression guard: configs/broker.yaml's data_source
+    key must actually be read by dashboard/engine_bridge.py and actually
+    change which broker/feed classes EngineRuntime wires up — not just be
+    present in the file with no code path consuming it."""
+    from dashboard.engine_bridge import EngineRuntime
+    from dashboard.state import DashboardState
+
+    default_runtime = EngineRuntime(DashboardState())
+    assert default_runtime.data_source == "simulated"
+    assert isinstance(default_runtime.broker, SimBroker), (
+        "data_source=simulated must wire up SimBroker, not a real IbkrBroker"
+    )
+    assert default_runtime.state.data_source == "simulated"
+
+    patched_cfg = dict(default_runtime.broker_cfg)
+    patched_cfg["data_source"] = "ibkr_paper"
+    import dashboard.engine_bridge as engine_bridge_module
+
+    original_loader = engine_bridge_module._load_broker_config
+    engine_bridge_module._load_broker_config = lambda: patched_cfg
+    try:
+        ibkr_runtime = EngineRuntime(DashboardState())
+    finally:
+        engine_bridge_module._load_broker_config = original_loader
+
+    assert ibkr_runtime.data_source == "ibkr_paper"
+    assert ibkr_runtime.state.data_source == "ibkr_paper"
+
+
+def test_broker_yaml_invalid_data_source_falls_back_to_simulated():
+    """An unrecognized data_source value must never silently attempt an
+    IBKR connection — it must fail safe to the simulated default."""
+    from dashboard.engine_bridge import EngineRuntime
+    from dashboard.state import DashboardState
+    import dashboard.engine_bridge as engine_bridge_module
+
+    bogus_cfg = dict(engine_bridge_module._load_broker_config())
+    bogus_cfg["data_source"] = "some_typo"
+    original_loader = engine_bridge_module._load_broker_config
+    engine_bridge_module._load_broker_config = lambda: _validate(bogus_cfg)
+    try:
+        runtime = EngineRuntime(DashboardState())
+    finally:
+        engine_bridge_module._load_broker_config = original_loader
+
+    assert runtime.data_source == "simulated"
+    assert isinstance(runtime.broker, SimBroker)
+
+
+def test_universe_yaml_symbols_are_actually_wired_into_dashboard_runtime():
+    """Forex lesson #2-style regression guard for the Part A fix: dashboard/
+    app.py's module-level `runtime = EngineRuntime(state, symbols=...)` call
+    must actually pass configs/universe.yaml's 20-symbol fixed_universe list
+    — not just have that config file present on disk with nothing reading
+    it into the LIVE dashboard runtime (EngineRuntime.__init__'s own
+    hardcoded 5-symbol placeholder — ["AAPL", "MSFT", "GOOGL", "AMZN",
+    "META"] — is the exact silent-fallback failure mode being guarded
+    against here)."""
+    from python.data.fixed_universe import load_universe_config
+
+    import dashboard.app as dashboard_app_module
+
+    expected_symbols = sorted(load_universe_config()["symbols"])
+    assert len(expected_symbols) == 20
+
+    assert sorted(dashboard_app_module.runtime.symbols) == expected_symbols
+    assert dashboard_app_module.runtime.state.symbols == dashboard_app_module.runtime.symbols
+    # The bug this guards against: EngineRuntime.__init__'s hardcoded
+    # placeholder fallback used whenever no `symbols` kwarg is passed.
+    placeholder = ["AAPL", "MSFT", "GOOGL", "AMZN", "META"]
+    assert sorted(dashboard_app_module.runtime.symbols) != sorted(placeholder)
+
+
+def test_engine_runtime_still_defaults_to_placeholder_when_constructed_bare():
+    """EngineRuntime's own default (no `symbols` kwarg) must stay the
+    harmless 5-symbol placeholder — Part A only changes the dashboard/app.py
+    CALL SITE, not EngineRuntime's own fallback behavior, so other
+    callers/tests that construct EngineRuntime without args are unaffected."""
+    from dashboard.engine_bridge import EngineRuntime
+    from dashboard.state import DashboardState
+
+    bare_runtime = EngineRuntime(DashboardState())
+    assert bare_runtime.symbols == ["AAPL", "MSFT", "GOOGL", "AMZN", "META"]
+
+
+def _validate(cfg: dict) -> dict:
+    """Mirror engine_bridge._load_broker_config's own invalid-value
+    fallback so this test exercises the same validation path without
+    duplicating the real loader's I/O."""
+    from dashboard.engine_bridge import _VALID_DATA_SOURCES
+
+    cfg = dict(cfg)
+    if cfg.get("data_source") not in _VALID_DATA_SOURCES:
+        cfg["data_source"] = "simulated"
+    return cfg

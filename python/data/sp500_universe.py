@@ -10,24 +10,31 @@ table of historical additions/removals with dates. Starting from the
 current list, we walk BACKWARD in time undoing each change (an addition on
 date D means the added ticker was NOT a member before D; a removal on date D
 means the removed ticker WAS a member before D) to reconstruct membership as
-of any past date.
+of any past date. The actual walk-backward algorithm lives in
+index_membership.py, shared with nasdaq100_universe.py.
 
 Explicit limitation (documented in README.md "Known limitations (MVP)"):
 this is NOT a professional point-in-time database. Wikipedia's changes
 table is not guaranteed complete for the entire history (coverage is best
 from ~2015 onward) and ticker symbols can be renamed/re-used. Treat this as
 a "much better than naive current-constituents-only" approximation, not a
-CRSP-grade universe. `docs/us_equity_health_check.md` must carry a
-disclaimer banner referencing this limitation whenever this module is used.
+CRSP-grade universe. `backtests/reports/us_equity_health_check.md` must
+carry a disclaimer banner referencing this limitation whenever this module
+is used.
+
+NOTE: S&P 500 alone under-represents actively-traded Nasdaq-listed names
+that the Index Committee's profitability screen excludes (e.g. recent
+mega-cap IPOs) — see python/data/liquid_universe.py, which unions this with
+nasdaq100_universe.py and applies a trailing-liquidity filter on top.
 """
 from __future__ import annotations
 
-import logging
 from datetime import datetime
 
 import pandas as pd
 
-log = logging.getLogger(__name__)
+from . import index_membership
+from .wiki_fetch import fetch_wiki_tables
 
 _WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 
@@ -35,7 +42,7 @@ _WIKI_URL = "https://en.wikipedia.org/wiki/List_of_S%26P_500_companies"
 def fetch_current_constituents() -> pd.DataFrame:
     """Returns a DataFrame with columns [symbol, security, sector,
     sub_industry] for the CURRENT S&P 500 constituents."""
-    tables = pd.read_html(_WIKI_URL)
+    tables = fetch_wiki_tables(_WIKI_URL)
     current = tables[0]
     current = current.rename(columns={
         "Symbol": "symbol", "Security": "security",
@@ -48,7 +55,7 @@ def fetch_current_constituents() -> pd.DataFrame:
 def fetch_membership_changes() -> pd.DataFrame:
     """Returns a DataFrame with columns [date, added, removed] parsed from
     the "Selected changes to the components" table."""
-    tables = pd.read_html(_WIKI_URL)
+    tables = fetch_wiki_tables(_WIKI_URL)
     changes = None
     for t in tables:
         cols = [str(c) for c in t.columns]
@@ -67,29 +74,20 @@ def fetch_membership_changes() -> pd.DataFrame:
     return changes[["date", "added_ticker", "removed_ticker"]]
 
 
-def point_in_time_membership(
+def sp500_point_in_time_membership(
     as_of: datetime,
     current_constituents: pd.DataFrame | None = None,
     changes: pd.DataFrame | None = None,
 ) -> set[str]:
     """Reconstruct S&P 500 membership as of `as_of` by undoing every
     membership change that occurred AFTER `as_of`, walking backward from the
-    current constituent list."""
+    current constituent list. Named `sp500_...` (not just
+    `point_in_time_membership`) to stay unambiguous now that
+    nasdaq100_universe.py has its own same-shaped per-index wrapper and
+    index_membership.py has the shared generic implementation."""
     current_constituents = current_constituents if current_constituents is not None else fetch_current_constituents()
     changes = changes if changes is not None else fetch_membership_changes()
-
-    membership = set(current_constituents["symbol"].tolist())
-
-    later_changes = changes[changes["date"] > pd.Timestamp(as_of)].sort_values("date", ascending=False)
-    for _, row in later_changes.iterrows():
-        added = row["added_ticker"]
-        removed = row["removed_ticker"]
-        if added and added != "nan" and added in membership:
-            membership.discard(added)   # wasn't a member before this addition
-        if removed and removed != "nan":
-            membership.add(removed)     # WAS a member before this removal
-
-    return membership
+    return index_membership.point_in_time_membership(as_of, current_constituents, changes)
 
 
 def universe_by_day(
@@ -102,8 +100,4 @@ def universe_by_day(
     date in `dates` (caches the Wikipedia tables so they are fetched once)."""
     current_constituents = current_constituents if current_constituents is not None else fetch_current_constituents()
     changes = changes if changes is not None else fetch_membership_changes()
-
-    result = {}
-    for d in dates:
-        result[d] = sorted(point_in_time_membership(d, current_constituents, changes))
-    return result
+    return index_membership.universe_by_day(dates, current_constituents, changes)

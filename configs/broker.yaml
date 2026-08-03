@@ -1,0 +1,40 @@
+# Data-source / broker configuration for the LIVE dashboard engine
+# (dashboard/engine_bridge.py). This is a deliberate config-file switch, not
+# a dashboard UI toggle — same "operational decision, not a UI button"
+# philosophy as configs/strategy.yaml's auto_execute (forex-trading lesson
+# #2, docs/lessons_from_forex_trading.md). Restart the dashboard backend
+# (scripts/start_dashboard.py) after changing this file for it to take
+# effect.
+#
+# data_source: simulated
+#   Clicking "Start (Paper)" runs a fully in-memory SimulatedFeed +
+#   SimBroker. Zero external network connections. This is the safe default
+#   and requires NO IB Gateway/TWS to be running.
+#
+# data_source: ibkr_paper
+#   Clicking "Start (Paper)" makes a REAL connection to IB Gateway or TWS on
+#   the ports below. You MUST have IB Gateway/TWS already running and
+#   logged into your PAPER trading account first, or the connection will
+#   fail/keep retrying — the dashboard status bar will show
+#   "IBKR: Disconnected" rather than silently pretending to be live.
+#   NEVER point broker_port/feed_port at a LIVE-account port (4001/7496)
+#   from this MVP dashboard — there is no live-trading UI safety net here.
+data_source: ibkr_paper
+
+# Where BACKTEST/RESEARCH historical daily bars come from
+# (python/data/price_cache.py):
+#   ibkr     — IB Gateway ADJUSTED_LAST daily bars (python/data/ibkr_price_source.py);
+#              same source family as the live execution path. If IB Gateway is
+#              not running, price_cache logs a warning and falls back to
+#              yfinance — the run proceeds, and reports label the actual source.
+#   yfinance — skip IB entirely (python/simulation/hist_data_us.py).
+historical_data_source: ibkr
+
+ibkr:
+  host: 127.0.0.1
+  feed_port: 4002          # IB Gateway paper=4002, TWS paper=7497
+  broker_port: 4002        # IB Gateway paper=4002, TWS paper=7497
+  feed_client_id: 11       # must differ from broker_client_id
+  broker_client_id: 21
+  historical_client_id: 31   # research/backtest historical fetches (python/data/ibkr_price_source.py)
+  tick_capture_client_id: 41 # tick/Level-2 depth capture (python/interfaces/ibkr_tick_capture.py)

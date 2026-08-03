@@ -230,11 +230,18 @@ class IbkrFeed(MarketDataFeed):
         bar_size: str = "1 day",
         duration: str = "2 Y",
         use_rth: bool = True,
+        end_datetime: str = "",
     ):
         """Fetch recent historical daily/intraday bars for research/prewarm.
         Returns a list of ib_async BarData objects (caller converts to
         Candle/Tick as needed) — kept close to the raw IBKR response so
-        callers can access adjusted close, volume, barCount, etc. directly."""
+        callers can access adjusted close, volume, barCount, etc. directly.
+
+        `end_datetime`: IB-format end anchor ("YYYYMMDD HH:MM:SS US/Eastern"
+        or an ib_async-accepted datetime); empty string means "now". Without
+        this parameter the method could only fetch windows ending at the
+        present moment, which made it useless for arbitrary historical
+        [start, end] backtest ranges (python/data/ibkr_price_source.py)."""
         try:
             from ib_async import IB, Stock  # type: ignore[import]
         except ImportError:
@@ -249,7 +256,7 @@ class IbkrFeed(MarketDataFeed):
             ib.qualifyContracts(contract)
             bars = ib.reqHistoricalData(
                 contract,
-                endDateTime="",
+                endDateTime=end_datetime,
                 durationStr=duration,
                 barSizeSetting=bar_size,
                 whatToShow="ADJUSTED_LAST",

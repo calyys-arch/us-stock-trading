@@ -38,7 +38,13 @@ class RateLimiter:
     def __init__(self, name: str, config: RateLimitConfig) -> None:
         self.name = name
         self.cfg = config
-        self._tokens = config.requests_per_second
+        # Bucket capacity must be at least ONE whole token: try_acquire needs
+        # tokens >= 1.0 to grant a request, so capping capacity at a
+        # sub-1.0 requests_per_second (e.g. IBKR historical pacing at 0.1/s)
+        # would make the bucket permanently ungrantable — every caller doing
+        # `while not try_acquire(): sleep(...)` would hang forever.
+        self._capacity = max(1.0, config.requests_per_second)
+        self._tokens = self._capacity
         self._last_refill = time.monotonic()
         self._lock = threading.Lock()
         self._daily_count = 0
@@ -49,7 +55,7 @@ class RateLimiter:
         now = time.monotonic()
         elapsed = now - self._last_refill
         self._tokens = min(
-            self.cfg.requests_per_second,
+            self._capacity,
             self._tokens + elapsed * self.cfg.requests_per_second,
         )
         self._last_refill = now

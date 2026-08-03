@@ -97,7 +97,7 @@ def market_impact(
     """Square-root market-impact model. Returns the estimated impact cost in
     USD. If `adv_dollars` is unknown/zero, returns 0.0 and callers should
     treat that as "impact unmodeled" rather than "impact is zero" (surface
-    this distinction in reports — see docs/us_equity_health_check.md)."""
+    this distinction in reports — see backtests/reports/us_equity_health_check.md)."""
     if adv_dollars <= 0 or order_notional <= 0:
         return 0.0
     participation = order_notional / adv_dollars

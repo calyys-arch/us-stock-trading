@@ -20,6 +20,13 @@ class SimBroker:
     def __init__(self) -> None:
         self._positions: dict[str, int] = {}
 
+    @property
+    def is_connected(self) -> bool:
+        """Always True — there is no external connection to lose. Exists so
+        callers (dashboard/engine_bridge.py) can treat SimBroker and
+        IbkrBroker uniformly when reporting connection status."""
+        return True
+
     def place_order(
         self,
         code: str,
@@ -27,18 +34,24 @@ class SimBroker:
         qty: int,
         limit_price: float = 0.0,
         order_type: str = "market",
+        stop_price: float = 0.0,
         tif: str = "DAY",
     ) -> dict:
         order_id = str(next(_order_ids))
         signed = qty if side.lower() == "buy" else -qty
         self._positions[code] = self._positions.get(code, 0) + signed
-        log.info("SimBroker: filled %s %s x%d @ %.2f (order_id=%s)", side, code, qty, limit_price, order_id)
+        # No slippage/partial-fill modeling here (see class docstring) — a
+        # stop_limit order fills immediately at its limit_price, same as a
+        # plain limit order, for simulation purposes.
+        fill_price = limit_price or stop_price
+        log.info("SimBroker: filled %s %s x%d @ %.2f (order_id=%s, type=%s)",
+                  side, code, qty, fill_price, order_id, order_type)
         return {
             "accepted": True,
             "order_id": order_id,
             "reason": None,
             "filled_qty": signed,
-            "avg_fill_price": limit_price,
+            "avg_fill_price": fill_price,
         }
 
     def cancel_order(self, order_id: str) -> bool:

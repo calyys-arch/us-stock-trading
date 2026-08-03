@@ -1,14 +1,24 @@
 :root {
-  --bg: #0e1116;
-  --panel: #161a23;
-  --border: #2a2f3a;
-  --text: #e6e9ef;
-  --text-dim: #8b93a3;
-  --accent: #4f8cff;
-  --green: #34c77b;
-  --red: #ef5b5b;
-  --amber: #e8b23a;
-  font-family: 'Inter', 'Segoe UI', system-ui, sans-serif;
+  /* IBKR TWS "Mosaic" dark theme palette */
+  --bg: #0a0c10;
+  --panel: #12151b;
+  --titlebar: #1a1f28;
+  --titlebar-border: #2f3543;
+  --border: #262b34;
+  --border-light: #363c48;
+  --text: #d7dae0;
+  --text-dim: #7c8494;
+  --text-faint: #565d6b;
+  --accent: #3d7de0;
+  --accent-dim: rgba(61, 125, 224, 0.16);
+  --green: #1fae67;
+  --green-dim: rgba(31, 174, 103, 0.14);
+  --red: #e5484d;
+  --red-dim: rgba(229, 72, 77, 0.14);
+  --amber: #e0a83e;
+  --amber-dim: rgba(224, 168, 62, 0.14);
+  --mono: 'SF Mono', 'IBM Plex Mono', 'Consolas', 'Liberation Mono', monospace;
+  font-family: 'Segoe UI', Arial, 'Helvetica Neue', sans-serif;
 }
 
 * {
@@ -21,6 +31,7 @@ html, body, #root {
   height: 100%;
   background: var(--bg);
   color: var(--text);
+  font-size: 13px;
 }
 
 button {
@@ -28,44 +39,292 @@ button {
   cursor: pointer;
 }
 
+/* thin dark scrollbars, TWS-style */
+::-webkit-scrollbar { width: 9px; height: 9px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: #2b313c; border-radius: 4px; }
+::-webkit-scrollbar-thumb:hover { background: #3a4150; }
+
 table {
   border-collapse: collapse;
   width: 100%;
+  font-size: 12px;
 }
 
 th, td {
   text-align: left;
-  padding: 6px 10px;
+  padding: 4px 8px;
   border-bottom: 1px solid var(--border);
-  font-size: 13px;
+  font-size: 12px;
+  white-space: nowrap;
 }
 
 th {
-  color: var(--text-dim);
-  font-weight: 500;
+  color: var(--text-faint);
+  font-weight: 600;
   text-transform: uppercase;
-  font-size: 11px;
-  letter-spacing: 0.03em;
+  font-size: 10px;
+  letter-spacing: 0.05em;
+  background: #0f1218;
+  position: sticky;
+  top: 0;
 }
 
+tbody tr:hover {
+  background: rgba(61, 125, 224, 0.06);
+}
+
+.num {
+  font-family: var(--mono);
+  font-variant-numeric: tabular-nums;
+}
+
+/* legacy single-box panel (still used by a couple of inline spots) */
 .panel {
   background: var(--panel);
   border: 1px solid var(--border);
-  border-radius: 8px;
+  border-radius: 3px;
   padding: 14px 16px;
 }
 
 .pill {
   display: inline-block;
-  padding: 2px 10px;
-  border-radius: 999px;
-  font-size: 12px;
-  font-weight: 600;
+  padding: 2px 9px;
+  border-radius: 3px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  text-transform: uppercase;
+  font-family: var(--mono);
 }
 
-.pill.observe { background: rgba(232, 178, 58, 0.15); color: var(--amber); }
-.pill.auto { background: rgba(52, 199, 123, 0.15); color: var(--green); }
-.pill.stopped { background: rgba(139, 147, 163, 0.15); color: var(--text-dim); }
+.pill.observe { background: var(--amber-dim); color: var(--amber); border: 1px solid rgba(224, 168, 62, 0.35); }
+.pill.auto { background: var(--green-dim); color: var(--green); border: 1px solid rgba(31, 174, 103, 0.35); }
+.pill.stopped { background: rgba(124, 132, 148, 0.12); color: var(--text-dim); border: 1px solid var(--border-light); }
+.pill.error { background: var(--red-dim); color: var(--red); border: 1px solid rgba(229, 72, 77, 0.35); }
 
 .positive { color: var(--green); }
 .negative { color: var(--red); }
+
+/* ===== Mosaic window chrome (IBKR TWS-style tiled panels) ===== */
+
+.mosaic-window {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 2px;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow: hidden;
+}
+
+.mosaic-titlebar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  background: var(--titlebar);
+  border-bottom: 1px solid var(--titlebar-border);
+  padding: 5px 10px;
+  flex: 0 0 auto;
+}
+
+.mosaic-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--text-dim);
+}
+
+.mosaic-titlebar-right {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mosaic-dots {
+  display: flex;
+  gap: 5px;
+  margin-left: 4px;
+}
+
+.mosaic-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #2b313c;
+  display: inline-block;
+}
+
+.mosaic-content {
+  padding: 10px 12px;
+  overflow: auto;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* ===== App shell ===== */
+
+.tws-shell {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  overflow: hidden;
+}
+
+.mosaic-grid {
+  flex: 1 1 auto;
+  display: grid;
+  gap: 8px;
+  padding: 8px;
+  overflow: auto;
+  grid-template-columns: 260px 1.4fr 1fr;
+  grid-template-rows: minmax(130px, 200px) minmax(160px, 260px) minmax(140px, 220px) minmax(300px, 400px) minmax(220px, 320px) minmax(200px, 280px);
+  grid-template-areas:
+    "account   weights   pairs"
+    "backtest  weights   pairs"
+    "positions positions positions"
+    "chart     chart     chart"
+    "signals   signals   signals"
+    "regime    regime    regime";
+}
+
+.area-account { grid-area: account; }
+.area-backtest { grid-area: backtest; }
+.area-weights { grid-area: weights; }
+.area-pairs { grid-area: pairs; }
+.area-positions { grid-area: positions; }
+.area-chart { grid-area: chart; }
+.area-signals { grid-area: signals; }
+.area-regime { grid-area: regime; }
+
+@media (max-width: 1100px) {
+  .mosaic-grid {
+    grid-template-columns: 1fr;
+    grid-template-rows: auto;
+    grid-template-areas:
+      "account"
+      "backtest"
+      "positions"
+      "weights"
+      "pairs"
+      "chart"
+      "signals"
+      "regime";
+  }
+}
+
+.signals-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 8px;
+  height: 100%;
+}
+
+@media (max-width: 700px) {
+  .signals-grid { grid-template-columns: 1fr; }
+}
+
+.chart-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.chart-grid-divider {
+  border-left: 1px solid var(--border);
+  padding-left: 14px;
+}
+
+@media (max-width: 800px) {
+  .chart-grid { grid-template-columns: 1fr; }
+  .chart-grid-divider { border-left: none; padding-left: 0; border-top: 1px solid var(--border); padding-top: 14px; }
+}
+
+/* ===== Toolbar (Header) ===== */
+
+.tws-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 0 14px;
+  height: 44px;
+  flex: 0 0 auto;
+  background: linear-gradient(180deg, #171b23 0%, #12151b 100%);
+  border-bottom: 1px solid var(--titlebar-border);
+}
+
+.tws-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.tws-logo {
+  width: 20px;
+  height: 20px;
+  border-radius: 3px;
+  background: var(--accent);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 800;
+  color: #fff;
+}
+
+.tws-brand-text {
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.02em;
+  color: var(--text);
+}
+
+.tws-led {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  display: inline-block;
+  margin-right: 6px;
+}
+
+.tws-btn {
+  background: transparent;
+  border: 1px solid var(--border-light);
+  color: var(--text);
+  border-radius: 2px;
+  padding: 6px 14px;
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+}
+
+.tws-btn:hover {
+  background: rgba(255, 255, 255, 0.04);
+}
+
+.tws-btn.primary { border-color: var(--accent); color: var(--accent); }
+.tws-btn.danger { border-color: var(--red); color: var(--red); }
+
+/* ===== Status bar (footer) ===== */
+
+.tws-statusbar {
+  flex: 0 0 auto;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 4px 14px;
+  height: 26px;
+  background: var(--titlebar);
+  border-top: 1px solid var(--titlebar-border);
+  font-size: 11px;
+  color: var(--text-dim);
+  font-family: var(--mono);
+}
+
+.tws-statusbar-left {
+  display: flex;
+  align-items: center;
+  gap: 16px;
+}
