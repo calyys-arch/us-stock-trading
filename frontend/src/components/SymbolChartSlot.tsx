@@ -1,24 +1,34 @@
 import { useEffect, useState } from 'react'
+import type { ChartInterval } from '../api'
 import { getSymbolChart, getSymbolContext } from '../api'
 import type { SymbolChartDto, SymbolContextDto } from '../types'
 import CandlestickChart, { type Bar, type PriceLevel, type SignalMarker } from './charts/CandlestickChart'
 
 const DAILY_RANGE_OPTIONS: { label: string; days: number }[] = [
+  { label: '3D', days: 3 },
   { label: '1M', days: 30 },
   { label: '3M', days: 90 },
   { label: '6M', days: 180 },
   { label: '1Y', days: 365 },
-  { label: '3Y', days: 1095 },
 ]
 
 // 1-minute bars are ~390/session (RTH) — a handful of days is already
-// dense on screen, and dashboard/app.py's /api/chart caps interval="1m"
-// at 60 calendar days server-side anyway.
+// dense on screen, and dashboard/app.py's /api/chart caps intraday
+// intervals at 60 calendar days server-side anyway. 5-Min/15-Min reuse the
+// same day ranges (they're resampled from the same 1-minute cache), just
+// with far fewer bars per session so the same window looks less crowded.
 const INTRADAY_RANGE_OPTIONS: { label: string; days: number }[] = [
   { label: '1D', days: 2 },
   { label: '3D', days: 4 },
   { label: '5D', days: 7 },
   { label: '10D', days: 14 },
+]
+
+const TIMEFRAME_OPTIONS: { value: ChartInterval; label: string }[] = [
+  { value: '1d', label: 'Daily' },
+  { value: '1m', label: '1-Min' },
+  { value: '5m', label: '5-Min' },
+  { value: '15m', label: '15-Min' },
 ]
 
 const LEVEL_COLORS: Record<string, string> = {
@@ -69,24 +79,32 @@ interface Props {
 /** One independent ticker/chart slot — a UI convenience for eyeballing any
  * US equity, independent of the strategy engine. Daily mode pulls real
  * daily bars via dashboard/app.py's /api/chart/{symbol} (IBKR-first,
- * yfinance-fallback, on-disk cache). 1-Minute mode pulls cached 1-minute
- * bars (?interval=1m, data/history_1m/ — built by
- * scripts/backfill_intraday.py, no live IB fetch from this endpoint) plus
+ * yfinance-fallback, on-disk cache). 1-Min/5-Min/15-Min modes pull cached
+ * 1-minute bars (?interval=1m|5m|15m, data/history_1m/ — built by
+ * scripts/backfill_intraday.py, no live IB fetch from this endpoint; 5-Min
+ * and 15-Min are resampled server-side from the same 1-minute cache) plus
  * /api/chart/{symbol}/context for the VWAP/liquidity-level/opening-range/
  * signal-marker overlays (python/microstructure/*, report-only diagnostics
  * — see docs/microstructure_pivot_plan.md). SymbolChartPanel renders two
  * of these side by side so two different stocks can be watched at once. */
 export default function SymbolChartSlot({ defaultSymbol, symbols = [], jumpTo }: Props) {
   const [input, setInput] = useState(defaultSymbol)
-  const [interval, setInterval_] = useState<'1d' | '1m'>('1d')
+  const [interval, setInterval_] = useState<ChartInterval>('1d')
   const [days, setDays] = useState(180)
   const [data, setData] = useState<SymbolChartDto | null>(null)
   const [context, setContext] = useState<SymbolContextDto | null>(null)
   const [contextError, setContextError] = useState<string | null>(null)
   const [loading, setLoading] = useState(false)
   const [error, setError] = useState<string | null>(null)
+  // Defaults to OFF: scan_signals_for_session deliberately does not skip
+  // bars while "in a position" (see its docstring), so a busy session can
+  // legitimately report a signal on most bars — dense enough by design
+  // that it's better shown on demand than always cluttering the chart.
+  const [showSignals, setShowSignals] = useState(false)
 
-  const load = async (symbol: string, rangeDays: number, tf: '1d' | '1m', contextDate?: string) => {
+  const isIntraday = interval !== '1d'
+
+  const load = async (symbol: string, rangeDays: number, tf: ChartInterval, contextDate?: string) => {
     const trimmed = symbol.trim().toUpperCase()
     if (!trimmed) return
     setInput(trimmed)
@@ -96,7 +114,7 @@ export default function SymbolChartSlot({ defaultSymbol, symbols = [], jumpTo }:
     try {
       const result = await getSymbolChart(trimmed, rangeDays, tf)
       setData(result)
-      if (tf === '1m') {
+      if (tf !== '1d') {
         try {
           setContext(await getSymbolContext(trimmed, contextDate))
         } catch (ctxErr) {
@@ -130,19 +148,19 @@ export default function SymbolChartSlot({ defaultSymbol, symbols = [], jumpTo }:
     if (data) load(data.symbol, rangeDays, interval)
   }
 
-  const handleTimeframeClick = (tf: '1d' | '1m') => {
+  const handleTimeframeClick = (tf: ChartInterval) => {
     if (tf === interval) return
-    const defaultDays = tf === '1m' ? INTRADAY_RANGE_OPTIONS[1].days : 180
+    const defaultDays = tf !== '1d' ? INTRADAY_RANGE_OPTIONS[1].days : 180
     setInterval_(tf)
     setDays(defaultDays)
     if (data) load(data.symbol, defaultDays, tf)
   }
 
   const handleContextDateClick = (date: string) => {
-    if (data) load(data.symbol, days, '1m', date)
+    if (data) load(data.symbol, days, interval, date)
   }
 
-  const rangeOptions = interval === '1m' ? INTRADAY_RANGE_OPTIONS : DAILY_RANGE_OPTIONS
+  const rangeOptions = isIntraday ? INTRADAY_RANGE_OPTIONS : DAILY_RANGE_OPTIONS
 
   const first = data?.close[0]
   const last = data?.close[data.close.length - 1]
@@ -184,19 +202,19 @@ export default function SymbolChartSlot({ defaultSymbol, symbols = [], jumpTo }:
           {loading ? '…' : 'Load'}
         </button>
         <div style={{ display: 'flex', gap: 2 }}>
-          {(['1d', '1m'] as const).map((tf) => (
+          {TIMEFRAME_OPTIONS.map(({ value, label }) => (
             <button
-              key={tf}
+              key={value}
               type="button"
-              onClick={() => handleTimeframeClick(tf)}
+              onClick={() => handleTimeframeClick(value)}
               className="tws-btn"
               style={{
                 fontSize: 10, padding: '4px 6px',
-                borderColor: interval === tf ? 'var(--accent)' : 'var(--border-light)',
-                color: interval === tf ? 'var(--accent)' : 'var(--text-dim)',
+                borderColor: interval === value ? 'var(--accent)' : 'var(--border-light)',
+                color: interval === value ? 'var(--accent)' : 'var(--text-dim)',
               }}
             >
-              {tf === '1d' ? 'Daily' : '1-Min'}
+              {label}
             </button>
           ))}
         </div>
@@ -246,7 +264,8 @@ export default function SymbolChartSlot({ defaultSymbol, symbols = [], jumpTo }:
       {!data && !error && !loading && (
         <div style={{ color: 'var(--text-dim)', fontSize: 12 }}>
           Type a US equity ticker and click Load. Daily = real daily bars (IBKR falls back to
-          yfinance). 1-Minute = cached microstructure bars (run scripts/backfill_intraday.py first).
+          yfinance). 1-Min/5-Min/15-Min = cached microstructure bars, 5-Min and 15-Min resampled
+          from the same cache (run scripts/backfill_intraday.py first).
         </div>
       )}
 
@@ -271,7 +290,7 @@ export default function SymbolChartSlot({ defaultSymbol, symbols = [], jumpTo }:
             </span>
           </div>
 
-          {interval === '1m' && context && (
+          {isIntraday && context && (
             <div style={{ display: 'flex', flexWrap: 'wrap', gap: 4, marginBottom: 8, alignItems: 'center' }}>
               <span style={{ fontSize: 9, color: 'var(--text-faint)', textTransform: 'uppercase' }}>Session:</span>
               {context.available_dates.slice(-8).map((d) => (
@@ -290,13 +309,21 @@ export default function SymbolChartSlot({ defaultSymbol, symbols = [], jumpTo }:
                 </button>
               ))}
               {context.signals.length > 0 && (
-                <span style={{ fontSize: 9, color: 'var(--text-faint)', marginLeft: 4 }}>
-                  {context.signals.length} signal(s) detected — report-only, see docs/microstructure_pivot_plan.md
-                </span>
+                <>
+                  <label style={{ display: 'flex', alignItems: 'center', gap: 3, fontSize: 9, color: 'var(--text-dim)', marginLeft: 4, cursor: 'pointer' }}>
+                    <input type="checkbox" checked={showSignals} onChange={(e) => setShowSignals(e.target.checked)} style={{ margin: 0 }} />
+                    Show markers
+                  </label>
+                  <span style={{ fontSize: 9, color: 'var(--text-faint)' }}>
+                    {context.signals.length} signal(s) detected — report-only, does not skip bars while "in a
+                    position" (see scan_signals_for_session), so a busy session can look dense; see
+                    docs/microstructure_pivot_plan.md
+                  </span>
+                </>
               )}
             </div>
           )}
-          {interval === '1m' && contextError && (
+          {isIntraday && contextError && (
             <div style={{ color: 'var(--amber)', fontSize: 10, marginBottom: 8 }}>
               Context unavailable: {contextError}
             </div>
@@ -306,11 +333,11 @@ export default function SymbolChartSlot({ defaultSymbol, symbols = [], jumpTo }:
             data={bars}
             height={230}
             interval={interval}
-            maPeriods={interval === '1m' ? [] : undefined}
+            maPeriods={isIntraday ? [] : undefined}
             vwap={vwapPoints}
             levels={buildLevels(context)}
             openingRange={context?.opening_range ?? null}
-            markers={buildMarkers(context)}
+            markers={showSignals ? buildMarkers(context) : []}
           />
         </div>
       )}

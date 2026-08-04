@@ -235,3 +235,49 @@ def cached_symbol_coverage(
             "total_bars": total_bars,
         }
     return out
+
+
+def resample_ohlcv(df: pd.DataFrame, freq: str) -> pd.DataFrame:
+    """Resample 1-minute OHLCV bars (as returned by get_cached_intraday_panel)
+    to a coarser intraday bar size, e.g. freq="5min" or "15min" — used by
+    dashboard/app.py's /api/chart for the 5-Min/15-Min chart buttons so we
+    don't need a separate on-disk cache or extra IB requests per bar size;
+    everything derives from the single 1-minute cache.
+
+    Resamples independently per calendar day (each session's bins anchored
+    to that day's own first bar, i.e. 09:30 ET) so a bin never spans the
+    overnight gap between sessions, and drops bins with no trades."""
+    if df.empty:
+        return df
+    chunks = []
+    for _, day_df in df.groupby(df.index.date):
+        resampled = day_df.resample(freq, origin="start").agg(
+            {"open": "first", "high": "max", "low": "min", "close": "last", "volume": "sum"},
+        )
+        chunks.append(resampled.dropna(subset=["open"]))
+    return pd.concat(chunks).sort_index() if chunks else df.iloc[0:0]
+
+
+def latest_cached_bar_time(
+    symbol: str,
+    cache_dir: str | Path = CACHE_DIR,
+) -> pd.Timestamp | None:
+    """Timestamp of the most recent cached 1-minute bar for `symbol`, or
+    None if nothing is cached at all. Used to anchor short lookback windows
+    (e.g. "1D"/"3D" chart buttons) on the most recent *available* session
+    rather than the wall clock — right after month-end/before the new
+    month's first session has traded (or simply before backfill has run for
+    today), a naive "now - N days" window can land entirely on empty
+    calendar days even though perfectly good recent data is cached."""
+    cache_dir = Path(cache_dir)
+    meta = _load_meta(cache_dir, symbol.upper())
+    for key in sorted(meta.keys(), reverse=True):
+        month_start = pd.Timestamp(key)
+        path = _month_parquet_path(cache_dir, symbol, month_start)
+        if not path.exists():
+            continue
+        df = pd.read_parquet(path, columns=["close"])
+        if df.empty:
+            continue
+        return pd.Timestamp(df.index.max())
+    return None

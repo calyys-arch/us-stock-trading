@@ -54,7 +54,9 @@ export function runPairsDemoScan(): Promise<{ pair_candidates: PairCandidate[] }
   return apiFetch('/api/pairs/demo_scan', { method: 'POST' })
 }
 
-export function getSymbolChart(symbol: string, days = 180, interval: '1d' | '1m' = '1d'): Promise<SymbolChartDto> {
+export type ChartInterval = '1d' | '1m' | '5m' | '15m'
+
+export function getSymbolChart(symbol: string, days = 180, interval: ChartInterval = '1d'): Promise<SymbolChartDto> {
   return apiFetch(`/api/chart/${encodeURIComponent(symbol.trim().toUpperCase())}?days=${days}&interval=${interval}`)
 }
 

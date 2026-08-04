@@ -18,6 +18,9 @@ exchange_calendars>=4.5
 # Data sources
 yfinance>=0.2           # historical bars for research/backtest prototyping
 ib_async>=1.0           # IBKR TWS/Gateway API (feed + broker), same as forex-trading
+futu-api>=10.9.6908     # Futu/Moomoo OpenD API — alternative tick/L2 capture source
+                        # (python/interfaces/futu_tick_capture.py) when the IB account
+                        # in use has no real-time market-data subscription available
 
 # Model persistence (Phase 3 ML layer)
 joblib>=1.3

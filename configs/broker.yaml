@@ -49,3 +49,25 @@ ibkr:
   broker_client_id: 21
   historical_client_id: 31   # research/backtest historical fetches (python/data/ibkr_price_source.py)
   tick_capture_client_id: 41 # tick/Level-2 depth capture (python/interfaces/ibkr_tick_capture.py)
+
+# Alternative tick/Level-2 capture source (python/interfaces/futu_tick_capture.py),
+# used instead of the ibkr: block above when scripts/capture_market_microstructure.py
+# is run with --source futu. Added 2026-08-04 because the IB Gateway session in use
+# turned out to be a free-standing IBKR Demo account (no linked live brokerage
+# account -> no real-time market-data subscription is possible, see README's
+# "never market order" section for the broader safety context). A funded
+# Futu/Moomoo account with LV3 quote permission can stream genuine real-time
+# tick-by-tick + Level-2 depth for US equities instead, through OpenD — Futu's
+# local gateway app (must already be running & logged in; default port 11111,
+# same "local-only, never remote" posture as ibkr.host above).
+futu:
+  host: 127.0.0.1
+  port: 11111
+  market_prefix: US   # OpenD stock codes are "<MARKET>.<SYMBOL>", e.g. US.AAPL
+  # Only needed if OpenD's "Encrypted Private Key" setting (API Service tab
+  # in the OpenD desktop app) is filled in — leave blank/commented if it's
+  # empty. Must be the SAME file OpenD itself is configured with, or every
+  # connection attempt fails with "check sha error!" on InitConnect
+  # (python/interfaces/futu_tick_capture.py's "Protocol encryption" note).
+  # Left blank here (machine-specific path) — set locally, don't commit it.
+  rsa_key_path: ""

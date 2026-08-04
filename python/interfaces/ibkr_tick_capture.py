@@ -168,6 +168,7 @@ class IbkrTickCapture:
                         "size": float(t.size),
                         "exchange": getattr(t, "exchange", ""),
                         "special_conditions": getattr(t, "specialConditions", ""),
+                        "source": "ibkr",
                     })
                     self.event_counts["trades"] += 1
                 elif hasattr(t, "bidPrice"):
@@ -177,6 +178,7 @@ class IbkrTickCapture:
                         "ask_price": float(t.askPrice),
                         "bid_size": float(t.bidSize),
                         "ask_size": float(t.askSize),
+                        "source": "ibkr",
                     })
                     self.event_counts["bidask"] += 1
             for d in ticker.domTicks:
@@ -188,6 +190,7 @@ class IbkrTickCapture:
                     "side": int(d.side),             # 0=ask 1=bid
                     "price": float(d.price),
                     "size": float(d.size),
+                    "source": "ibkr",
                 })
                 self.event_counts["depth"] += 1
         self._writer.flush()

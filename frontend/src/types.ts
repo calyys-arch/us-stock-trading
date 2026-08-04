@@ -56,7 +56,7 @@ export interface ExecutionReportDto {
 
 export interface SymbolChartDto {
   symbol: string
-  interval: '1d' | '1m'
+  interval: '1d' | '1m' | '5m' | '15m'
   dates: string[]
   open: number[]
   high: number[]

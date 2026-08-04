@@ -145,7 +145,8 @@ python scripts/self_improve_loop.py --iterations 3  # real data, fixed universe
 # news/calendars for the signal-trap report (backtests/reports/signal_trap_report.md),
 # and continuous tick/L2 depth capture for its order-book heuristics
 python scripts/refresh_event_data.py
-python scripts/capture_market_microstructure.py
+python scripts/capture_market_microstructure.py                # source: IB Gateway (default)
+python scripts/capture_market_microstructure.py --source futu   # source: Futu/Moomoo OpenD
 
 # Dark-pool-internalization context (Tier 2, coarse/weekly, optional): FINRA's
 # free public OTC Transparency API. `recent` covers roughly the trailing
@@ -185,6 +186,39 @@ dashboard's toolbar/status bar show `IBKR PAPER — connected` or
 silently pretends to be live. This is a config-file switch, not a UI
 toggle, by design (same philosophy as `configs/strategy.yaml`'s
 `auto_execute` — see `docs/lessons_from_forex_trading.md`).
+
+### Tick/L2 capture: IB Gateway vs. Futu/Moomoo (`--source`)
+
+`scripts/capture_market_microstructure.py` (report-only; never touches the
+trading engine — see "Known limitations" below) supports two interchangeable
+sources for the tick-by-tick + Level-2 archive that feeds
+`python/signals/trap_detector.py`:
+
+- `--source ibkr` (default) — `python/interfaces/ibkr_tick_capture.py`.
+  Needs IB Gateway/TWS running + logged in, **and** a real-time
+  market-data subscription on the connected account. A free-standing IBKR
+  **Demo** account (Client Portal shows "This is not a brokerage account" /
+  Customer Type "Individual (Demo)") cannot get one — Demo accounts have no
+  linked live account to subscribe against, so they are permanently capped
+  at 15-20min delayed data (`Error 10189`/`10190`, `Warning 2152`). Only a
+  Paper Trading account created *from* a real (KYC-approved, not
+  necessarily funded) live account can share that live account's real-time
+  subscriptions (Client Portal → Settings → Paper Trading Account → Share
+  real-time market data).
+- `--source futu` — `python/interfaces/futu_tick_capture.py`. Needs
+  Futu/Moomoo's local **OpenD** gateway app running + logged in (default
+  port 11111, `configs/broker.yaml`'s `futu:` block), with a funded account
+  that has LV3 (or better) US-equity quote permission. Genuinely real-time,
+  no subscription dead-end. Trade-offs vs. IB: no per-print venue/condition
+  codes (Futu's US Ticker feed doesn't expose them), so
+  `dark_pool_internalization_score` and `print_lag_score` correctly report
+  "unavailable" for Futu-sourced days; and Level-2 depth arrives as full
+  ordered snapshots rather than IB's native insert/update/delete diff
+  stream, so `futu_tick_capture.py` synthesizes diff events by comparing
+  consecutive snapshots position-by-position (an approximation, documented
+  in that module's docstring). Both sources write into the SAME
+  `data/ticks/` + `data/depth/` archive, tagged `"source": "futu"` /
+  `"source": "ibkr"` per row.
 
 ## Tests
 

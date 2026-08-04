@@ -68,7 +68,10 @@ def test_chart_1m_404_when_no_cached_data(client):
 
 
 def test_chart_invalid_interval_rejected(client):
-    resp = client.get("/api/chart/AAPL", params={"interval": "5m"})
+    # "5m"/"15m" are valid (resampled on the fly from the 1-minute cache —
+    # see get_symbol_chart's docstring); "3m" isn't one of the supported
+    # bar sizes and must still be rejected.
+    resp = client.get("/api/chart/AAPL", params={"interval": "3m"})
     assert resp.status_code == 400
 
 

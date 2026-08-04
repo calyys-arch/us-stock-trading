@@ -15,10 +15,12 @@ Endpoints:
   GET  /api/backtest/latest    — latest stored backtest summary
   GET  /api/chart/{symbol}     — on-demand price chart for any ticker.
                                   ?interval=1d (default, daily bars, any
-                                  history) or ?interval=1m (1-minute bars,
+                                  history) or 1m/5m/15m (intraday bars,
                                   CACHE ONLY — data/history_1m/, built by
                                   scripts/backfill_intraday.py; no live IB
-                                  fetch from this endpoint).
+                                  fetch from this endpoint. 5m/15m are
+                                  resampled on the fly from the 1-minute
+                                  cache, see intraday_cache.resample_ohlcv).
   GET  /api/chart/{symbol}/context — microstructure context (VWAP + bands,
                                   liquidity levels, volume profile, opening
                                   range) for one cached 1-minute session —
@@ -293,53 +295,80 @@ async def get_symbol_chart(symbol: str, days: int = 180, interval: str = "1d") -
     a symbol/range can take a few seconds (real fetch + on-disk cache
     write); subsequent requests for an already-covered range are instant.
 
-    interval="1m": 1-minute bars via python/data/intraday_cache.py, READ
-    FROM THE LOCAL CACHE ONLY (data/history_1m/) — this endpoint never
-    triggers a live IB fetch, matching intraday_cache.get_cached_intraday_panel's
-    contract. Run scripts/backfill_intraday.py first to populate it; a 404
-    here means "no cached 1-minute bars in range", not "no data exists"."""
+    interval in ("1m", "5m", "15m"): intraday bars via python/data/intraday_cache.py,
+    READ FROM THE LOCAL 1-MINUTE CACHE ONLY (data/history_1m/) — this endpoint
+    never triggers a live IB fetch, matching intraday_cache.get_cached_intraday_panel's
+    contract. "5m"/"15m" are resampled on the fly from the same 1-minute cache
+    (intraday_cache.resample_ohlcv) — there is no separate 5-/15-minute cache
+    or extra IB request per bar size. Run scripts/backfill_intraday.py first
+    to populate the cache; a 404 here means "no cached 1-minute bars in
+    range", not "no data exists"."""
     import pandas as pd
 
     symbol = _validate_symbol(symbol)
     loop = asyncio.get_event_loop()
 
-    if interval == "1m":
-        from python.data.intraday_cache import get_cached_intraday_panel
+    if interval in ("1m", "5m", "15m"):
+        from python.data.intraday_cache import get_cached_intraday_panel, latest_cached_bar_time, resample_ohlcv
 
         days = max(1, min(days, 60))
         end = pd.Timestamp.now().normalize() + pd.Timedelta(days=1)
         start = end - pd.Timedelta(days=days)
+
+        def _load(start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
+            panel = get_cached_intraday_panel([symbol], start, end)
+            return panel.xs(symbol, level="code").sort_index()
+
         try:
-            panel = await loop.run_in_executor(
-                None, lambda: get_cached_intraday_panel([symbol], start, end),
-            )
-            df = panel.xs(symbol, level="code").sort_index()
+            df = await loop.run_in_executor(None, lambda: _load(start, end))
         except Exception as exc:
-            raise HTTPException(
-                status_code=404,
-                detail=f"No cached 1-minute bars for {symbol} in range — run "
-                       f"scripts/backfill_intraday.py first ({exc})",
-            ) from exc
+            # A naive "now - N days" window can land entirely on empty
+            # calendar days (weekend, holiday, before today's session has
+            # traded, or simply before backfill has run yet) even though
+            # good recent data is cached. Retry anchored on the most recent
+            # bar actually on disk before giving up — this is what "show me
+            # the last N days" should mean for a short intraday window.
+            anchor = await loop.run_in_executor(None, lambda: latest_cached_bar_time(symbol))
+            if anchor is None:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No cached 1-minute bars for {symbol} in range — run "
+                           f"scripts/backfill_intraday.py first ({exc})",
+                ) from exc
+            end = anchor.normalize() + pd.Timedelta(days=1)
+            start = end - pd.Timedelta(days=days)
+            try:
+                df = await loop.run_in_executor(None, lambda: _load(start, end))
+            except Exception as exc2:
+                raise HTTPException(
+                    status_code=404,
+                    detail=f"No cached 1-minute bars for {symbol} in range — run "
+                           f"scripts/backfill_intraday.py first ({exc2})",
+                ) from exc2
+
+        if interval != "1m":
+            freq = {"5m": "5min", "15m": "15min"}[interval]
+            df = await loop.run_in_executor(None, lambda: resample_ohlcv(df, freq))
 
         return {
             "symbol": symbol,
-            "interval": "1m",
+            "interval": interval,
             "dates": [t.isoformat() for t in df.index],
             "open": df["open"].round(4).tolist(),
             "high": df["high"].round(4).tolist(),
             "low": df["low"].round(4).tolist(),
             "close": df["close"].round(4).tolist(),
             "volume": [int(v) for v in df["volume"]],
-            "source": "ibkr_cache_1m",
+            "source": "ibkr_cache_1m" if interval == "1m" else f"ibkr_cache_1m_resampled_{interval}",
             "quality_flagged": False,
         }
 
     if interval != "1d":
-        raise HTTPException(status_code=400, detail=f"interval must be '1d' or '1m', got {interval!r}")
+        raise HTTPException(status_code=400, detail=f"interval must be one of '1d', '1m', '5m', '15m', got {interval!r}")
 
     from python.data.price_cache import get_cached_price_panel
 
-    days = max(5, min(days, 3650))
+    days = max(1, min(days, 3650))
     end = pd.Timestamp.now().normalize()
     start = end - pd.Timedelta(days=days)
 
