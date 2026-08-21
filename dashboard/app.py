@@ -23,15 +23,29 @@ Endpoints:
                                   cache, see intraday_cache.resample_ohlcv).
   GET  /api/chart/{symbol}/context — microstructure context (VWAP + bands,
                                   liquidity levels, volume profile, opening
-                                  range) for one cached 1-minute session —
+                                  range, pre-open 1h environment) for one
+                                  cached 1-minute session —
                                   python/microstructure/context.py, for
                                   overlaying on the 1m chart.
+  GET  /api/preopen_1h           — pre-open 1-hour environment for every
+                                  symbol in configs/universe.yaml (value-up
+                                  / value-down / sideways), using only
+                                  completed RTH sessions before the date.
   GET  /api/regime/{symbol}    — report-only Markov regime diagnostic
                                   (Bull/Bear/Sideways transition matrix +
                                   stationary distribution) on daily bars —
                                   python/analytics/regime.py. NOT wired to
                                   any strategy/order; see that module's
                                   docstring for the honesty contract.
+  GET  /api/signal_journal/today — today's (US/Eastern date) live
+                                  microstructure signal journal entries
+                                  (python/microstructure/signal_journal.py)
+                                  — every MicroSignal that fired today,
+                                  approved or RiskEngine-filtered, per
+                                  docs/microstructure_pivot_plan.md §7's
+                                  "今日訊號" panel. Backend-only for now;
+                                  see that endpoint's docstring for the
+                                  deferred frontend panel.
 
 Serves the built frontend (frontend/dist) as static files when present, so
 `uvicorn dashboard.app:app` alone is enough for a production-style demo;
@@ -47,6 +61,8 @@ from pathlib import Path
 from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+
+from python.microstructure.signal_journal import SignalJournal, today_et_date
 
 from .engine_bridge import EngineRuntime
 from .state import state
@@ -65,25 +81,20 @@ app.add_middleware(
 
 
 def _load_live_universe_symbols() -> list[str] | None:
-    """configs/universe.yaml's fixed_universe.symbols (the SAME 20-symbol,
-    top-by-liquidity universe scripts/run_intraday_backtest.py and the
-    self-improve WFO loop use) — wired in here so the live dashboard
-    runtime actually streams/trades the universe operators believe it
-    does, instead of silently falling back to EngineRuntime's 5-symbol
-    hardcoded placeholder (see EngineRuntime.__init__ and
-    DashboardState's module docstring, which already flags this exact
-    mismatch). Returns None (-> EngineRuntime's own hardcoded fallback)
-    rather than crashing FastAPI startup if the config is missing or
-    malformed, matching dashboard/engine_bridge.py's own
-    _load_broker_config fail-safe style."""
-    from python.data.fixed_universe import load_universe_config
-
+    """Paper-forward experiment (2026-08-15): the live tick universe is
+    the frozen TIGHT6 list for absorption_breakout
+    (AAPL GOOGL NVDA MSFT PLTR INTC), not the full 20-symbol research
+    universe. Pairs uses its own daily-bar ETF universe and does not
+    need those names on the tick feed. Returns None (-> EngineRuntime's
+    TIGHT6 fallback) if the allowlist cannot be imported."""
     try:
-        return list(load_universe_config()["symbols"])
+        from python.core.paper_forward import ABSORPTION_BREAKOUT_UNIVERSE
+
+        return list(ABSORPTION_BREAKOUT_UNIVERSE)
     except Exception:
         log.exception(
-            "dashboard.app: failed to load configs/universe.yaml — EngineRuntime will fall back "
-            "to its hardcoded 5-symbol placeholder universe"
+            "dashboard.app: failed to load TIGHT6 paper universe — EngineRuntime will fall back "
+            "to its own ABSORPTION_BREAKOUT_UNIVERSE default"
         )
         return None
 
@@ -394,7 +405,7 @@ async def get_symbol_chart(symbol: str, days: int = 180, interval: str = "1d") -
     }
 
 
-_CONTEXT_SIGNALS = ["sweep_reclaim", "fvg_retest", "orb_vwap", "l2_absorption"]
+_CONTEXT_SIGNALS = ["sweep_reclaim", "fvg_retest", "orb_vwap", "l2_absorption", "auction_reclaim", "vsa_effort", "vsa_no_demand", "obv_divergence"]
 
 
 @app.get("/api/chart/{symbol}/context")
@@ -421,6 +432,7 @@ async def get_symbol_intraday_context(symbol: str, date: str | None = None, or_m
     from python.backtest.intraday_engine import SIGNAL_PARAM_KEYS, scan_signals_for_session
     from python.data.intraday_cache import get_cached_intraday_panel
     from python.microstructure.context import compute_context
+    from python.microstructure.signals.auction_reclaim import preopen_1h_environment
 
     symbol = _validate_symbol(symbol)
     loop = asyncio.get_event_loop()
@@ -456,6 +468,7 @@ async def get_symbol_intraday_context(symbol: str, date: str | None = None, or_m
     prior_dates = [d for d in available_dates if d < target_date]
     bars_today = df.loc[df.index.normalize() == target_date]
     prior_day_bars = df.loc[df.index.normalize() == prior_dates[-1]] if prior_dates else None
+    prior_sessions = [df.loc[df.index.normalize() == d] for d in prior_dates[-2:]]
 
     ctx_state = compute_context(bars_today, prior_day_bars, or_minutes=max(1, min(or_minutes, 120)))
     vwap_df = ctx_state.vwap
@@ -468,7 +481,10 @@ async def get_symbol_intraday_context(symbol: str, date: str | None = None, or_m
         params = {k: base_cfg[k] for k in SIGNAL_PARAM_KEYS[sig_name] if k in base_cfg}
         try:
             hits = await loop.run_in_executor(
-                None, lambda sn=sig_name, p=params: scan_signals_for_session(sn, bars_today, p, prior_day_bars=prior_day_bars),
+                None, lambda sn=sig_name, p=params: scan_signals_for_session(
+                    sn, bars_today, p, prior_day_bars=prior_day_bars, symbol=symbol,
+                    prior_sessions=prior_sessions,
+                ),
             )
         except Exception:
             log.exception("scan_signals_for_session failed for %s/%s — omitting from context response", symbol, sig_name)
@@ -514,7 +530,76 @@ async def get_symbol_intraday_context(symbol: str, date: str | None = None, or_m
             "end": ctx_state.opening_range.end.isoformat() if ctx_state.opening_range.end is not None else None,
         },
         "signals": detected_signals,
+        "preopen_1h": preopen_1h_environment(prior_sessions).to_dict(),
         "available_dates": [d.strftime("%Y-%m-%d") for d in available_dates],
+    }
+
+
+@app.get("/api/preopen_1h")
+async def get_universe_preopen_1h(date: str | None = None) -> dict:
+    """Observe each universe stock's 1-hour environment BEFORE that
+    session opens. Uses only completed RTH 1-minute cache
+    (data/history_1m/). `date` is the session about to open (default:
+    today ET). Report-only — does not emit or arm a trade."""
+    import pandas as pd
+
+    from python.data.fixed_universe import load_universe_config
+    from python.data.intraday_cache import get_cached_intraday_panel, latest_cached_bar_time
+    from python.microstructure.signals.auction_reclaim import scan_universe_preopen
+
+    symbols = load_universe_config()["symbols"]
+    if date:
+        asof = pd.Timestamp(date).normalize()
+    else:
+        latest = None
+        for sym in symbols:
+            ts = latest_cached_bar_time(sym)
+            if ts is not None and (latest is None or ts > latest):
+                latest = ts
+        if latest is None:
+            raise HTTPException(
+                status_code=404,
+                detail="No cached 1-minute bars — run scripts/backfill_intraday.py first",
+            )
+        asof = latest.normalize() + pd.Timedelta(days=1)
+    start = asof - pd.Timedelta(days=15)
+    end = asof + pd.Timedelta(days=1)
+    loop = asyncio.get_event_loop()
+
+    def _scan() -> list[dict]:
+        panel = get_cached_intraday_panel(symbols, start, end)
+        bars_by_symbol = {}
+        for sym in symbols:
+            if sym in set(panel.index.get_level_values("code")):
+                bars_by_symbol[sym] = panel.xs(sym, level="code").sort_index()
+        return scan_universe_preopen(bars_by_symbol, asof)
+
+    try:
+        rows = await loop.run_in_executor(None, _scan)
+    except Exception as exc:
+        raise HTTPException(
+            status_code=404,
+            detail=f"No cached 1-minute bars for pre-open 1h scan — run scripts/backfill_intraday.py first ({exc})",
+        ) from exc
+
+    return {
+        "date": asof.strftime("%Y-%m-%d"),
+        "n_symbols": len(rows),
+        "n_value_up": sum(1 for r in rows if r["structure"] == "value_up"),
+        "n_value_down": sum(1 for r in rows if r["structure"] == "value_down"),
+        "n_sideways": sum(1 for r in rows if r["structure"] == "sideways"),
+        "n_unknown": sum(1 for r in rows if r["structure"] == "unknown"),
+        "n_buying": sum(1 for r in rows if r["trader_side"] == "buying"),
+        "n_selling": sum(1 for r in rows if r["trader_side"] == "selling"),
+        "n_rotational": sum(1 for r in rows if r["trader_side"] == "rotational"),
+        "n_building": sum(1 for r in rows if r["trader_pace"] == "building"),
+        "n_fading": sum(1 for r in rows if r["trader_pace"] == "fading"),
+        "n_opposed": sum(
+            1 for r in rows
+            if (r["structure"] == "value_up" and r["trader_side"] == "selling")
+            or (r["structure"] == "value_down" and r["trader_side"] == "buying")
+        ),
+        "symbols": rows,
     }
 
 
@@ -554,6 +639,31 @@ async def get_symbol_regime(symbol: str, years: int = 5, window: int = 20, thres
         raise HTTPException(status_code=404, detail=f"No price data available for {symbol}: {exc}") from exc
 
     return report.to_dict()
+
+
+@app.get("/api/signal_journal/today")
+async def get_signal_journal_today() -> dict:
+    """Today's (US/Eastern calendar date) entries from
+    python/microstructure/signal_journal.py — every live microstructure
+    MicroSignal that fired today, whether or not RiskEngine's gate
+    approved it (`risk_passed` on each entry), plus a still-pending
+    `outcome` placeholder per entry (see that module's docstring for why
+    outcome tracking isn't wired up yet). Read-only, always 200 — an empty
+    `signals: []` (before the market opens, or if no signal has fired yet
+    today) is a normal, expected response, not an error.
+
+    docs/microstructure_pivot_plan.md §7's "dashboard 新增「今日訊號」面板":
+    this endpoint is the backend half only — see this task's final report
+    for why the frontend table itself is deferred."""
+    loop = asyncio.get_event_loop()
+
+    def _load() -> tuple[str, list[dict]]:
+        journal = SignalJournal()
+        today = today_et_date()
+        return today.isoformat(), journal.read_day(today)
+
+    date_str, rows = await loop.run_in_executor(None, _load)
+    return {"date": date_str, "signals": rows, "count": len(rows)}
 
 
 _FRONTEND_DIST = Path(__file__).parent.parent / "frontend" / "dist"

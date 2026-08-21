@@ -89,8 +89,8 @@ interface Props {
  * of these side by side so two different stocks can be watched at once. */
 export default function SymbolChartSlot({ defaultSymbol, symbols = [], jumpTo }: Props) {
   const [input, setInput] = useState(defaultSymbol)
-  const [interval, setInterval_] = useState<ChartInterval>('1d')
-  const [days, setDays] = useState(180)
+  const [interval, setInterval_] = useState<ChartInterval>('5m')
+  const [days, setDays] = useState(INTRADAY_RANGE_OPTIONS[1].days)
   const [data, setData] = useState<SymbolChartDto | null>(null)
   const [context, setContext] = useState<SymbolContextDto | null>(null)
   const [contextError, setContextError] = useState<string | null>(null)

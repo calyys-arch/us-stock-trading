@@ -7,6 +7,7 @@ import PairsPanel from './components/PairsPanel'
 import PortfolioWeightsTable from './components/PortfolioWeightsTable'
 import PositionsPanel from './components/PositionsPanel'
 import RegimePanel from './components/RegimePanel'
+import SignalJournalPanel from './components/SignalJournalPanel'
 import SignalsLog from './components/SignalsLog'
 import StatCards from './components/StatCards'
 import StatusBar from './components/StatusBar'
@@ -33,6 +34,10 @@ export default function App() {
         dataSource={state.data_source}
         ibkrBrokerConnected={state.ibkr_broker_connected}
         ibkrFeedConnected={state.ibkr_feed_connected}
+        futuLiveFeedActive={state.futu_live_feed_active}
+        armedStrategies={state.armed_strategies}
+        pairsRegimeGateOpen={state.pairs_regime_gate_open}
+        pairsRegimeGateReason={state.pairs_regime_gate_reason}
         onStart={() => startEngine()}
         onStop={() => stopEngine()}
       />
@@ -64,6 +69,8 @@ export default function App() {
         <div className="area-signals">
           <SignalsLog signals={state.recent_signals} reports={state.recent_execution_reports} />
         </div>
+
+        <SignalJournalPanel />
 
         <MosaicWindow title="Market Regime (Report-Only Diagnostic)" className="area-regime">
           <RegimePanel />

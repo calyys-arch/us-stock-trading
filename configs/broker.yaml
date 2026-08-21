@@ -20,17 +20,40 @@
 #   NEVER point broker_port/feed_port at a LIVE-account port (4001/7496)
 #   from this MVP dashboard — there is no live-trading UI safety net here.
 #
+# data_source: futu_live
+#   Clicking "Start (Paper)" runs the live engine against REAL Futu-sourced
+#   tick + Level-2 data, via python/interfaces/futu_live_feed.py's
+#   FutuLiveFeed. Unlike ibkr_paper, this does NOT open any new broker/feed
+#   connection of its own — it TAILS the data/ticks/<SYMBOL>/<date>.jsonl and
+#   data/depth/<SYMBOL>/<date>.jsonl files that
+#   `scripts/capture_market_microstructure.py --source futu` is already
+#   writing, so it needs zero additional Futu subscription quota and cannot
+#   interfere with that script's own connection. Requirements before using
+#   this: (1) the capture script must already be running and actively
+#   writing TODAY's files for the symbols you care about (OpenD must be
+#   logged in for THAT process, not for this dashboard — this feed opens no
+#   Futu socket at all); (2) if the capture script isn't running yet /
+#   hasn't written today's file for a symbol, that symbol just emits no
+#   ticks (logged once, not a crash) until the file appears. The broker
+#   stays SimBroker in this mode — this is real DATA, still-paper/observe
+#   EXECUTION (docs/microstructure_pivot_plan.md §7's Phase 2, strictly
+#   observe-only).
+#
 # NOTE: this key only gates dashboard/engine_bridge.py's EngineRuntime (the
 # "Start (Paper)" button in the web dashboard). It has no effect on the
 # offline backtest/WFO scripts (python/data/price_cache.py uses
 # historical_data_source below) or on scripts/capture_market_microstructure.py
-# (always connects directly to IB Gateway for tick/L2 capture regardless of
-# this switch). Flip this to ibkr_paper locally whenever you want to test
-# the live dashboard against a real IB Gateway/TWS paper session — just
-# don't commit that change; the checked-in default must stay `simulated`
-# (test_broker_yaml_data_source_is_actually_read_by_engine_runtime enforces
-# this so a `git pull` can never silently start requiring IB Gateway).
-data_source: simulated
+# itself (that script's --source flag is independent of this switch, and it
+# must already be running on its own for data_source: futu_live to have
+# anything to tail).
+#
+# 2026-08-15 paper-forward experiment: the checked-in default is futu_live
+# so Start (Paper) tails real Futu capture rather than a SimulatedFeed
+# (a simulated feed would make the experiment fake). Broker stays SimBroker
+# — PAPER execution, never a live IBKR money path. Requires OpenD +
+# `scripts/capture_market_microstructure.py --source futu` already running.
+# See backtests/reports/absorption_breakout_paper_protocol.md.
+data_source: futu_live
 
 # Where BACKTEST/RESEARCH historical daily bars come from
 # (python/data/price_cache.py):

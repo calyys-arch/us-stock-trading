@@ -25,10 +25,26 @@ class DashboardState:
     # dashboard button). "simulated" needs no external connection at all;
     # "ibkr_paper" requires IB Gateway/TWS to be running and logged into the
     # paper account — ibkr_*_connected reflect the REAL connection state so
-    # the UI never silently pretends a live session exists.
-    data_source: str = "simulated"      # "simulated" | "ibkr_paper"
+    # the UI never silently pretends a live session exists. "futu_live"
+    # needs scripts/capture_market_microstructure.py --source futu already
+    # running (OpenD logged in for THAT process, not this one) —
+    # futu_live_feed_active reflects the same "a tick actually arrived"
+    # liveness signal as ibkr_feed_connected, via file-tailing instead of a
+    # direct connection (see python/interfaces/futu_live_feed.py).
+    data_source: str = "simulated"      # "simulated" | "ibkr_paper" | "futu_live"
     ibkr_broker_connected: bool = False  # meaningful only when data_source == "ibkr_paper"
     ibkr_feed_connected: bool = False    # meaningful only when data_source == "ibkr_paper"
+    futu_live_feed_active: bool = False  # meaningful only when data_source == "futu_live"
+
+    # Paper-forward experiment status (2026-08-15) — which strategies the
+    # gateway currently has in its auto-execute allowlist, and whether the
+    # pairs trend-efficiency gate is open. Empty / closed by default
+    # (observe mode, fail-closed).
+    armed_strategies: list = field(default_factory=list)
+    pairs_regime_gate_open: bool = False
+    pairs_regime_gate_reason: str = "not_yet_evaluated"
+    live_gate_regime: str = "undecided"
+    live_gate_policy: dict = field(default_factory=dict)
 
     # Live tick-feed symbol universe (EngineRuntime.symbols) — used by the
     # dashboard's Symbol Chart panel as quick-select chips. NOT the same as
@@ -82,6 +98,12 @@ class DashboardState:
                 "data_source": self.data_source,
                 "ibkr_broker_connected": self.ibkr_broker_connected,
                 "ibkr_feed_connected": self.ibkr_feed_connected,
+                "futu_live_feed_active": self.futu_live_feed_active,
+                "armed_strategies": list(self.armed_strategies),
+                "pairs_regime_gate_open": self.pairs_regime_gate_open,
+                "pairs_regime_gate_reason": self.pairs_regime_gate_reason,
+                "live_gate_regime": self.live_gate_regime,
+                "live_gate_policy": dict(self.live_gate_policy),
                 "symbols": list(self.symbols),
                 "open_pairs": list(self.open_pairs),
                 "pair_candidates": list(self.pair_candidates),

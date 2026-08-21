@@ -1,4 +1,4 @@
-import type { BacktestSummary, DashboardStateDto, PairCandidate, PositionDto, RegimeReportDto, SymbolChartDto, SymbolContextDto } from './types'
+import type { BacktestSummary, DashboardStateDto, PairCandidate, PositionDto, RegimeReportDto, SignalJournalResponseDto, SymbolChartDto, SymbolContextDto } from './types'
 
 async function apiFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(path, init)
@@ -79,4 +79,13 @@ export function getSymbolRegime(symbol: string, opts?: { years?: number; window?
   if (opts?.threshold) params.set('threshold', String(opts.threshold))
   const qs = params.toString() ? `?${params.toString()}` : ''
   return apiFetch(`/api/regime/${encodeURIComponent(symbol.trim().toUpperCase())}${qs}`)
+}
+
+/** Today's (US/Eastern) signal journal — dashboard/app.py's
+ * /api/signal_journal/today, python/microstructure/signal_journal.py.
+ * Every live microstructure signal seen today, GO-signal or not — see
+ * that module's docstring. Always 200; an empty `signals: []` is a
+ * normal "nothing recorded yet today" response, not an error. */
+export function getSignalJournalToday(): Promise<SignalJournalResponseDto> {
+  return apiFetch('/api/signal_journal/today')
 }

@@ -256,6 +256,15 @@ def main() -> int:
         action="store_true",
         help="seed cells from official reports already on disk (no WFO)",
     )
+    parser.add_argument(
+        "--force",
+        action="store_true",
+        help=(
+            "re-run the selected cells even when --resume already has them. "
+            "Needed to replace an imported cell whose published numbers cannot "
+            "be reproduced by the current code"
+        ),
+    )
     args = parser.parse_args()
 
     selected = list(routes) if args.hypothesis == "all" else [args.hypothesis]
@@ -340,9 +349,27 @@ def main() -> int:
             if minutes not in route.charts:
                 continue
             key = _cell_key(name, minutes)
-            if key in cells:
+            if key in cells and not (args.force and key in planned):
                 print(f"    skip {key}", flush=True)
                 continue
+            superseded = None
+            if key in cells:
+                prior_cell = cells[key]
+                prior_fw = prior_cell.get("full_window_metrics") or {}
+                superseded = {
+                    "imported_from": prior_cell.get("imported_from"),
+                    "decision": prior_cell.get("decision"),
+                    "n_trades": prior_fw.get("n_trades"),
+                    "profit_factor": prior_fw.get("profit_factor"),
+                    "total_net_pnl": prior_fw.get("total_net_pnl"),
+                    "reason": (
+                        "replaced by a re-run under committed code; the published "
+                        "numbers could not be reproduced from the same window and "
+                        "frozen params"
+                    ),
+                }
+                print(f"    force re-run {key} (was "
+                      f"{prior_cell.get('imported_from') or 'locally run'})", flush=True)
             if route.kind == "daily":
                 cells[key] = {
                     "signal": route.signal,
@@ -375,6 +402,8 @@ def main() -> int:
             result["route_gates"] = collect_route_gates(
                 result.get("gates") or {}, result.get("soft_gates") or {},
             )
+            if superseded is not None:
+                result["superseded"] = superseded
             cells[key] = result
             payload["cells"] = cells
             payload["pending"] = [k for k in all_keys if k not in cells]

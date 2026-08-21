@@ -2,9 +2,27 @@ export interface DashboardStateDto {
   running: boolean
   mode: 'observe' | 'auto'
   started_at: string | null
-  data_source: 'simulated' | 'ibkr_paper'
+  data_source: 'simulated' | 'ibkr_paper' | 'futu_live'
   ibkr_broker_connected: boolean
   ibkr_feed_connected: boolean
+  futu_live_feed_active?: boolean
+  armed_strategies?: string[]
+  pairs_regime_gate_open?: boolean
+  pairs_regime_gate_reason?: string
+  live_gate_regime?: string
+  live_gate_policy?: {
+    regime: string
+    vol?: string
+    strategies: Array<{
+      strategy: string
+      allowed: boolean
+      gate_set: string
+      n_gates?: number
+      required: string[]
+      results: Record<string, boolean>
+      reason: string
+    }>
+  }
   symbols: string[]
   open_pairs: OpenPair[]
   pair_candidates: PairCandidate[]
@@ -135,6 +153,49 @@ export interface PositionDto {
   code: string
   qty: number
   side: 'long' | 'short'
+}
+
+/** One journal entry — dashboard/app.py's GET /api/signal_journal/today,
+ * python/microstructure/signal_journal.py's `SignalJournal.record()`.
+ * Recorded for EVERY live microstructure signal that fires, whether or
+ * not RiskEngine's gate (`risk_passed`) went on to approve it.
+ * `qualified_order` fields are null when not approved. `outcome.status`
+ * is always "pending" for now — outcome tracking isn't wired up yet, see
+ * that module's docstring. */
+export interface SignalJournalEntryDto {
+  signal_time: string
+  symbol: string
+  strategy: string
+  direction: 'long' | 'short'
+  entry_price: number
+  stop_price: number
+  target_price: number | null
+  order_type: string
+  expiry_time: string | null
+  context: Record<string, unknown>
+  risk_passed: boolean
+  rejection_reason: string | null
+  qualified_order: {
+    qty: number | null
+    entry_limit_price: number | null
+    stop_price: number | null
+    stop_limit_price: number | null
+    target_price: number | null
+    gross_notional: number | null
+  }
+  outcome: {
+    status: 'pending' | 'closed'
+    exit_price: number | null
+    exit_time: string | null
+    pnl: number | null
+    pnl_pct: number | null
+  }
+}
+
+export interface SignalJournalResponseDto {
+  date: string
+  signals: SignalJournalEntryDto[]
+  count: number
 }
 
 export interface BacktestSummary {

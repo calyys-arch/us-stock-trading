@@ -179,13 +179,14 @@ tbody tr:hover {
   padding: 8px;
   overflow: auto;
   grid-template-columns: 260px 1.4fr 1fr;
-  grid-template-rows: minmax(130px, 200px) minmax(160px, 260px) minmax(140px, 220px) minmax(300px, 400px) minmax(220px, 320px) minmax(200px, 280px);
+  grid-template-rows: minmax(130px, 200px) minmax(160px, 260px) minmax(140px, 220px) minmax(300px, 400px) minmax(220px, 320px) minmax(220px, 320px) minmax(200px, 280px);
   grid-template-areas:
     "account   weights   pairs"
     "backtest  weights   pairs"
     "positions positions positions"
     "chart     chart     chart"
     "signals   signals   signals"
+    "journal   journal   journal"
     "regime    regime    regime";
 }
 
@@ -196,6 +197,7 @@ tbody tr:hover {
 .area-positions { grid-area: positions; }
 .area-chart { grid-area: chart; }
 .area-signals { grid-area: signals; }
+.area-journal { grid-area: journal; }
 .area-regime { grid-area: regime; }
 
 @media (max-width: 1100px) {
@@ -210,6 +212,7 @@ tbody tr:hover {
       "pairs"
       "chart"
       "signals"
+      "journal"
       "regime";
   }
 }

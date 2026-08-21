@@ -27,6 +27,10 @@ data/signals/*.jsonl
 # so the whole directory is ignored, same as data/depth/.
 data/history/
 data/history_1m/
+data/history_altuni_daily20/
+data/history_altuni_midcap_full/
+data/history_altuni_rank/
+data/history_gfc2008/
 data/ticks/
 data/depth/
 # scripts/snapshot_gex.py — naive options GEX as-of capture day. No
@@ -73,3 +77,6 @@ Thumbs.db
 # Scratch / manual UI-check artifacts (screenshots, ad-hoc logs)
 tmp/
 files/
+
+# Rendered research-report PDFs (regenerable via scripts/render_entry_hypothesis_pdf.py)
+/*.pdf
