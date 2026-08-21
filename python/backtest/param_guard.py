@@ -39,6 +39,10 @@ MAX_FREE_PARAMETERS = 5
 _NON_PARAMETER_KEYS = {
     "enabled", "auto_execute", "allow_overnight", "flatten_buffer_minutes",
     "coint_lookback_days", "revalidate_every_days", "notional_per_leg",
+    # Paper-forward-test operational/sizing keys (2026-08-15) — not signal
+    # thresholds. See python/core/paper_forward.py and the two protocol
+    # markdown files under backtests/reports/.
+    "paper_notional_per_leg", "paper_max_notional_usd", "live_universe",
 }
 
 

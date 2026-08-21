@@ -22,6 +22,8 @@ from python.backtest.optimize import (
     check_drawdown_gate,
     check_has_trades_gate,
     check_min_trades_gate,
+    check_pooled_profit_factor_gate,
+    check_pooled_trades_gate,
     check_profit_factor_gate,
     expand_param_grid,
     load_param_grid,
@@ -118,6 +120,16 @@ def test_load_wfo_config_applies_per_strategy_override():
     assert xsection.is_days == 504
     assert pairs.is_days == 1008          # goal.yaml wfo.pairs_trading.is_days
     assert pairs.oos_days == xsection.oos_days == 126
+
+
+def test_load_wfo_config_reads_max_sharpe_decay_from_goal_yaml():
+    import yaml
+
+    with open("configs/goal.yaml", encoding="utf-8") as f:
+        goal = yaml.safe_load(f)
+    decay = float(goal["wfo"]["max_sharpe_decay"])
+    cfg = load_wfo_config("auction_reclaim")
+    assert cfg.max_sharpe_decay == decay
 
 
 # ── pairs warmup contract ────────────────────────────────────────────────────
@@ -228,6 +240,28 @@ def test_min_trades_gate():
 def test_profit_factor_gate():
     assert check_profit_factor_gate(_wfo_result_with_folds([{"profit_factor": 1.5}, {"profit_factor": 2.0}]), 1.3) is True
     assert check_profit_factor_gate(_wfo_result_with_folds([{"profit_factor": 1.5}, {"profit_factor": 0.9}]), 1.3) is False
+
+
+def test_pooled_trades_gate_uses_oos_total_not_every_fold():
+    sparse = _wfo_result_with_folds([{"n_trades": 12}, {"n_trades": 8}, {"n_trades": 25}])
+    assert check_min_trades_gate(sparse, 100) is False
+    assert check_pooled_trades_gate(sparse, 40) is True
+    assert check_pooled_trades_gate(sparse, 50) is False
+    assert check_pooled_trades_gate(_wfo_result_with_folds([]), 40) is False
+
+
+def test_pooled_profit_factor_gate_is_trade_weighted():
+    # 10 trades at 2.0 and 90 trades at 1.0 → weighted 1.10, clears 1.1.
+    mixed = _wfo_result_with_folds([
+        {"n_trades": 10, "profit_factor": 2.0},
+        {"n_trades": 90, "profit_factor": 1.0},
+    ])
+    assert check_profit_factor_gate(mixed, 1.1) is False
+    assert check_pooled_profit_factor_gate(mixed, 1.1) is True
+    assert check_pooled_profit_factor_gate(mixed, 1.15) is False
+    assert check_pooled_profit_factor_gate(
+        _wfo_result_with_folds([{"n_trades": 0, "profit_factor": 9.0}]), 1.1,
+    ) is False
 
 
 # ── intraday (microstructure signals) window restriction + stress test ──────

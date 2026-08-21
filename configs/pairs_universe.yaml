@@ -1,0 +1,117 @@
+# Candidate universe for the POINT-IN-TIME pair scan
+# (python/backtest/pairs_scan_engine.py, scripts/run_pairs_scan_backtest.py).
+#
+# This file is DATA (which instruments may be paired with which), not a set of
+# tunable strategy parameters — the same status configs/universe.yaml has for
+# xsection_mean_reversion. python/backtest/param_guard.py deliberately does not
+# count it against the Chan Ch.3 five-free-parameter budget; see
+# backtests/reports/pairs_scan_report.md for the explicit accounting.
+#
+# ── Why ETFs rather than single stocks ──────────────────────────────────────
+# The single-name alternative (e.g. configs/universe.yaml's fixed top-20
+# dollar-volume list) is survivorship-biased by construction: it was ranked on
+# 2026-07-28 and then applied backwards across 2018-2026, so every name in it is
+# a name that survived, stayed liquid, and never got acquired/delisted. For a
+# cointegration SCAN that bias is far more damaging than it is for a fixed
+# single pair, because the scan's whole job is to pick which relationships
+# persisted — exactly the quantity a survivor-only list inflates.
+#
+# Broad, index-tracking ETFs structurally remove that problem: constituent
+# delistings, M&A and index-membership changes are absorbed INSIDE the fund by
+# its own index rebalancing, so the tradeable instrument itself has a continuous
+# history. Every ticker below launched well before 2017-01-01 (verified against
+# the fetched history — see scripts/run_pairs_scan_backtest.py's
+# `--min-history-start` guard, which drops any symbol whose first bar postdates
+# the requested warmup start rather than silently trading a short series).
+#
+# Residual caveat, stated rather than hidden: this is still a list of ETFs that
+# exist TODAY. ETF closures do happen. The mitigation is that every fund below
+# is a large, long-established, index-tracking product whose closure probability
+# over 2018-2026 was negligible — not that the bias is mathematically zero.
+#
+# ── Why buckets ─────────────────────────────────────────────────────────────
+# Chan Ch.7 p.129 warns explicitly about the multiple-comparison trap: testing
+# every possible pair in a large universe produces thousands of false positives
+# at any conventional significance level. Candidate pairs are therefore formed
+# ONLY within an a-priori economic bucket (all pairs inside a bucket, no pairs
+# across buckets). The bucket assignment below is fixed BEFORE any backtest was
+# run and is never re-cut based on results.
+
+pairs_universe:
+  computed_at: '2026-08-13'
+  selection_rule: >-
+    All within-bucket pairs (a, b) with a < b. No cross-bucket pairs. Bucket
+    membership assigned a-priori by economic exposure, never by backtest result.
+  buckets:
+    us_equity_broad:
+      - SPY    # S&P 500
+      - QQQ    # Nasdaq-100
+      - IWM    # Russell 2000
+      - DIA    # Dow 30
+      - MDY    # S&P MidCap 400
+      - RSP    # S&P 500 equal weight
+    us_sector:
+      - XLB    # materials
+      - XLE    # energy
+      - XLF    # financials
+      - XLI    # industrials
+      - XLK    # technology
+      - XLP    # consumer staples
+      - XLRE   # real estate
+      - XLU    # utilities
+      - XLV    # health care
+      - XLY    # consumer discretionary
+    us_industry:
+      - IBB    # biotech
+      - IGV    # software
+      - ITB    # home construction
+      - IYR    # US real estate
+      - IYT    # transportation
+      - KBE    # banks
+      - KRE    # regional banks
+      - OIH    # oil services
+      - SMH    # semiconductors
+      - SOXX   # semiconductors (alternate index)
+      - XBI    # biotech (equal weight)
+      - XHB    # homebuilders
+      - XME    # metals & mining
+      - XOP    # oil & gas E&P
+      - XRT    # retail
+    commodity:
+      - DBC    # broad commodity
+      - GDX    # gold miners
+      - GDXJ   # junior gold miners
+      - GLD    # gold
+      - SIL    # silver miners
+      - SLV    # silver
+      - UNG    # natural gas
+      - USO    # crude oil
+    fixed_income:
+      - AGG    # US aggregate
+      - BND    # US total bond
+      - EMB    # EM USD sovereign
+      - HYG    # high yield
+      - IEF    # 7-10y treasury
+      - JNK    # high yield (alternate index)
+      - LQD    # investment grade credit
+      - MBB    # agency MBS
+      - SHY    # 1-3y treasury
+      - TIP    # TIPS
+      - TLT    # 20y+ treasury
+    intl_equity:
+      - EEM    # emerging markets
+      - EFA    # developed ex-US
+      - EWA    # Australia
+      - EWC    # Canada
+      - EWG    # Germany
+      - EWH    # Hong Kong
+      - EWJ    # Japan
+      - EWT    # Taiwan
+      - EWU    # United Kingdom
+      - EWW    # Mexico
+      - EWY    # South Korea
+      - EWZ    # Brazil
+      - FXI    # China large cap
+      - ILF    # Latin America
+      - VGK    # Europe
+      - VWO    # emerging markets (alternate index)

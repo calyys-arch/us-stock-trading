@@ -246,6 +246,127 @@ def build_pairs_backtest_fn(
     return backtest_fn
 
 
+# ── Pairs, scanned universe ─────────────────────────────────────────────────
+
+def build_pairs_scan_backtest_fn(
+    close_panel: pd.DataFrame,
+    adv_panel: pd.DataFrame,
+    scan_schedule: dict,
+    base_cfg: dict,
+    half_spread_bps: float | None = None,
+    max_concurrent_pairs: int | None = None,
+    exit_rules: dict | None = None,
+    entry_gate: pd.Series | None = None,
+):
+    """Returns backtest_fn(start, end, params) for WalkForwardOptimizer, over
+    the SCANNED pair universe (python/backtest/pairs_scan_engine.py).
+
+    `entry_gate` (optional, default None = unchanged behavior): forwarded
+    unmodified to `pairs_scan_engine.run_scan_backtest` — see that function's
+    docstring. Used by `backtests/reports/regime_gate_report.md` Phase 2 to
+    apply `python/analytics/trend_efficiency_gate.shifted_entry_gate` as a
+    point-in-time entry filter; every existing caller that omits this
+    argument gets byte-identical behavior to before this parameter existed.
+
+    Warmup handling is identical to `build_pairs_backtest_fn`: the slice
+    handed to the engine starts `coint_lookback_days` trading rows before
+    `start`, but reported metrics come exclusively from P&L booked and trades
+    exited inside [start, end). Those warmup rows are strictly historical at
+    `start`, so this adds no look-ahead.
+
+    `scan_schedule` is precomputed ONCE over the full price history by
+    `pairs_scan_engine.build_scan_schedule` and shared by every fold. That is
+    both the performance story (one CADF fit per pair per scan date for the
+    whole study, not per fold per candidate) and a correctness one: the scan
+    cadence is anchored to the full index, so no fold can shift it.
+
+    `exit_rules` switches on the opt-in exit ablations (`dynamic_half_life`,
+    `coint_breakdown_exit`, `stop_z_multiple`, `stale_timeout_enabled` — see
+    `PairsScanConfig`). It is applied identically to every fold and every
+    parameter candidate, i.e. it defines the STRATEGY VARIANT under test and
+    is never something the walk-forward search can select. Omit it and the
+    behavior is unchanged.
+    """
+    from .pairs_scan_engine import PairsScanConfig, run_scan_backtest
+
+    def backtest_fn(start: datetime, end: datetime, params: dict) -> dict:
+        merged = {**base_cfg, **params}
+        cfg = PairsScanConfig(
+            entry_z=merged["entry_z"],
+            exit_z=merged["exit_z"],
+            coint_lookback_days=merged["coint_lookback_days"],
+            revalidate_every_days=merged["revalidate_every_days"],
+            notional_per_leg=merged["notional_per_leg"],
+            half_life_multiplier_max_hold=merged["half_life_multiplier_max_hold"],
+            min_half_life_days=merged["min_half_life_days"],
+            max_half_life_days=merged["max_half_life_days"],
+        )
+        if half_spread_bps is not None:
+            cfg.half_spread_bps = float(half_spread_bps)
+        if max_concurrent_pairs is not None:
+            cfg.max_concurrent_pairs = int(max_concurrent_pairs)
+        for key, value in (exit_rules or {}).items():
+            if not hasattr(cfg, key):
+                raise ValueError(f"unknown exit rule {key!r}")
+            setattr(cfg, key, value)
+
+        start_ts, end_ts = pd.Timestamp(start), pd.Timestamp(end)
+        idx = close_panel.index.to_numpy()
+        start_pos = int(np.searchsorted(idx, np.datetime64(start_ts), side="left"))
+        end_pos = int(np.searchsorted(idx, np.datetime64(end_ts), side="left"))
+        warmup_pos = max(0, start_pos - cfg.coint_lookback_days)
+        window_close = close_panel.iloc[warmup_pos:end_pos]
+        if len(window_close) <= cfg.coint_lookback_days:
+            return _pairs_scan_metrics(pd.Series(dtype=float), [], 0)
+        window_adv = adv_panel.iloc[warmup_pos:end_pos]
+
+        report = run_scan_backtest(window_close, window_adv, scan_schedule, cfg, entry_gate=entry_gate)
+
+        in_window_pnl = {d: p for d, p in report.daily_pnl.items()
+                         if start_ts <= pd.Timestamp(d) < end_ts}
+        pnl_idx = pd.DatetimeIndex(sorted(in_window_pnl.keys()))
+        returns = pd.Series([in_window_pnl[d] / _CAPITAL for d in pnl_idx], index=pnl_idx)
+        trades = [t for t in report.trades if start_ts <= pd.Timestamp(t.exit_date) < end_ts]
+        return _pairs_scan_metrics(returns, trades, report.open_at_end)
+
+    return backtest_fn
+
+
+def _profit_factor(values) -> float:
+    wins = sum(v for v in values if v > 0)
+    losses = abs(sum(v for v in values if v < 0))
+    if losses > 0:
+        return float(wins / losses)
+    return float("inf") if wins > 0 else 0.0
+
+
+def _pairs_scan_metrics(returns: pd.Series, trades: list, open_at_end: int = 0) -> dict:
+    """`_metrics_from_returns` plus the pairs-scan-specific diagnostics the
+    report needs PER FOLD rather than only in aggregate.
+
+    `profit_factor` is cost-adjusted (net_pnl is already after commission,
+    fees, borrow, impact and half-spread); `profit_factor_gross` is the same
+    quantity before any cost, which is what separates "the edge is real but
+    too small to pay for itself" from "there is no edge". `exit_reasons` is
+    here because the exit-rule ablations are judged on it directly, and
+    `open_at_end` because a rule that simply holds losers longer would
+    otherwise look better by never booking them.
+    """
+    metrics = _metrics_from_returns(
+        returns, len(trades), float(sum(t.net_pnl for t in trades)))
+    metrics["profit_factor"] = _profit_factor([t.net_pnl for t in trades])
+    metrics["profit_factor_gross"] = _profit_factor([t.gross_pnl for t in trades])
+    metrics["gross_pnl"] = float(sum(t.gross_pnl for t in trades))
+    metrics["total_cost"] = float(sum(t.cost for t in trades))
+    metrics["n_distinct_pairs"] = len({(t.code_a, t.code_b) for t in trades})
+    reasons: dict[str, int] = {}
+    for t in trades:
+        reasons[t.exit_reason] = reasons.get(t.exit_reason, 0) + 1
+    metrics["exit_reasons"] = dict(sorted(reasons.items()))
+    metrics["open_at_end"] = int(open_at_end)
+    return metrics
+
+
 # ── Cross-sectional ──────────────────────────────────────────────────────────
 
 def build_xsection_backtest_fn(
@@ -344,15 +465,47 @@ def run_intraday_stress_test(
     start: datetime,
     end: datetime,
     stress_slippage_multiplier: float = 2.0,
+    warmup_days: int = 1,
+    half_spread_bps_by_symbol: dict[str, float] | None = None,
+    base_engine_cfg: IntradayBacktestConfig | None = None,
 ) -> dict:
     """Re-runs the SAME window/params at `stress_slippage_multiplier`x the
     normal slippage cost (configs/goal.yaml intraday.stress_slippage_multiplier)
     — docs/microstructure_pivot_plan.md §4c's mandatory 2x-slippage stress
     test. A signal that only survives at 1x cost is not survivable; this is
     a hard, separate re-run rather than a parameter in param_grids.yaml so
-    it can never be accidentally "optimized away" by the grid search."""
-    stress_cfg = IntradayBacktestConfig(stress_slippage_multiplier=stress_slippage_multiplier)
-    fn = build_intraday_backtest_fn(bars_by_symbol, signal_name, base_cfg, engine_cfg=stress_cfg)
+    it can never be accidentally "optimized away" by the grid search.
+    `warmup_days` must match whatever was used to build the signal's main
+    backtest_fn (see build_intraday_backtest_fn's docstring) — passing a
+    mismatched value would not be incorrect for causality (warmup is always
+    >= the minimum needed), but WOULD make a signal that structurally needs
+    more warmup silently perform worse under stress than under normal
+    conditions for a data-availability reason having nothing to do with
+    slippage, which would misattribute the stress test's result.
+    `half_spread_bps_by_symbol` (default None -> unchanged flat-cost
+    behavior) is the SAME calibrated-spread override as
+    build_intraday_backtest_fn/IntradayBacktestConfig — the 2x multiplier
+    still applies on top of whichever half-spread (flat or per-symbol) is
+    in effect, since `_slippage_price` applies `stress_slippage_multiplier`
+    to the resolved half_spread_bps+impact total, not to the flat constant
+    specifically.
+    `base_engine_cfg` copies structural knobs (chart_minutes,
+    time_stop_minutes, signal_filter_overrides) so a 1m/15m WFO is
+    stressed on the same decision chart, not silently reset to 5m."""
+    base = base_engine_cfg or IntradayBacktestConfig()
+    spreads = (
+        half_spread_bps_by_symbol
+        if half_spread_bps_by_symbol is not None
+        else base.half_spread_bps_by_symbol
+    )
+    stress_cfg = IntradayBacktestConfig(
+        stress_slippage_multiplier=stress_slippage_multiplier,
+        half_spread_bps_by_symbol=spreads,
+        chart_minutes=base.chart_minutes,
+        time_stop_minutes=base.time_stop_minutes,
+        signal_filter_overrides=dict(base.signal_filter_overrides),
+    )
+    fn = build_intraday_backtest_fn(bars_by_symbol, signal_name, base_cfg, engine_cfg=stress_cfg, warmup_days=warmup_days)
     return fn(start, end, params)
 
 
@@ -367,6 +520,16 @@ def check_min_trades_gate(wfo_result: WFOResult, min_trades: int) -> bool:
     return all(int(fold.oos_metrics.get("n_trades", 0)) >= min_trades for fold in wfo_result.folds)
 
 
+def check_pooled_trades_gate(wfo_result: WFOResult, min_total: int) -> bool:
+    """Pooled OOS fills across folds. Sparse signals (Creamer/VSA) cannot
+    honestly clear 100 fills in every 30-day fold; the sample that matters
+    is the walk-forward OOS total."""
+    if not wfo_result.folds:
+        return False
+    total = sum(int(fold.oos_metrics.get("n_trades", 0)) for fold in wfo_result.folds)
+    return total >= min_total
+
+
 def check_profit_factor_gate(wfo_result: WFOResult, min_profit_factor: float) -> bool:
     """Every OOS fold's cost-adjusted profit factor (gross profit / gross
     loss, already net of slippage + commission) must clear the ceiling
@@ -374,6 +537,25 @@ def check_profit_factor_gate(wfo_result: WFOResult, min_profit_factor: float) ->
     if not wfo_result.folds:
         return False
     return all(float(fold.oos_metrics.get("profit_factor", 0.0)) >= min_profit_factor for fold in wfo_result.folds)
+
+
+def check_pooled_profit_factor_gate(wfo_result: WFOResult, min_profit_factor: float) -> bool:
+    """Trade-weighted mean of OOS fold profit factors. One quiet losing
+    month must not veto a sparse signal whose pooled OOS still covers
+    costs."""
+    if not wfo_result.folds:
+        return False
+    weighted = 0.0
+    n = 0
+    for fold in wfo_result.folds:
+        trades = int(fold.oos_metrics.get("n_trades", 0))
+        if trades <= 0:
+            continue
+        weighted += float(fold.oos_metrics.get("profit_factor", 0.0)) * trades
+        n += trades
+    if n <= 0:
+        return False
+    return (weighted / n) >= min_profit_factor
 
 
 def check_drawdown_gate(wfo_result: WFOResult, max_oos_drawdown: float) -> bool:

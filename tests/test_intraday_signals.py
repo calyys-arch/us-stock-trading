@@ -189,6 +189,76 @@ def test_orb_vwap_gap_trap_flips_direction():
     assert sig.context["breakout_dir"] == "long"
 
 
+def test_orb_vwap_stop_is_always_on_the_adverse_side_of_entry():
+    """Regression guard for the gap-trap inverted-stop defect
+    (orb_vwap.py's CORRECTNESS FIX note): the trap rule flips `direction`,
+    and the original stop assignment then landed on the FAVORABLE side of
+    the entry, which intraday_engine._check_exit fires immediately as a
+    profitable exit labelled "stop". Both the ordinary and the trap-faded
+    case must place the stop where it can only lose money."""
+    bars = _orb_bars()
+    bars.loc[bars.index[20], "close"] = 100.0
+    bars.loc[bars.index[21], ["high", "low", "close"]] = [102.5, 101.5, 102.0]  # breakout LONG
+    orange = context.opening_range(bars, minutes=15)
+    vwap = context.session_vwap(bars)
+
+    plain = orb_mod.evaluate_orb_vwap(bars.iloc[:22], orange, vwap.iloc[:22], vwap_side_filter=False)
+    assert plain.direction == "long"
+    assert plain.stop_price < plain.entry_price
+    assert plain.stop_price == pytest.approx(99.0)  # unchanged: the raw OR low
+
+    trapped = orb_mod.evaluate_orb_vwap(
+        bars.iloc[:22], orange, vwap.iloc[:22], vwap_side_filter=False, prior_close=110.0,
+    )
+    assert trapped.direction == "short" and trapped.context["trap_flag"] is True
+    assert trapped.stop_price > trapped.entry_price
+    # Beyond the failed-breakout extreme (this bar's high 102.5), not the
+    # opening-range high (101.0) which the break already ran through.
+    assert trapped.stop_price == pytest.approx(102.5)
+
+
+def test_orb_vwap_atr_buffer_widens_the_stop_and_is_off_by_default():
+    bars = _orb_bars()
+    bars.loc[bars.index[20], "close"] = 100.0
+    bars.loc[bars.index[21], ["high", "low", "close"]] = [102.0, 101.5, 102.0]
+    orange = context.opening_range(bars, minutes=15)
+    vwap = context.session_vwap(bars)
+    atr = context.atr(bars)
+
+    no_buffer = orb_mod.evaluate_orb_vwap(bars.iloc[:22], orange, vwap.iloc[:22], vwap_side_filter=False)
+    buffered = orb_mod.evaluate_orb_vwap(
+        bars.iloc[:22], orange, vwap.iloc[:22], vwap_side_filter=False,
+        atr_series=atr.iloc[:22], stop_atr_buffer_mult=0.5,
+    )
+    atr_now = float(atr.iloc[21])
+    assert atr_now > 0
+    assert buffered.stop_price == pytest.approx(no_buffer.stop_price - 0.5 * atr_now)
+
+    # A buffer requested without an ATR series is skipped, not guessed.
+    no_atr = orb_mod.evaluate_orb_vwap(
+        bars.iloc[:22], orange, vwap.iloc[:22], vwap_side_filter=False, stop_atr_buffer_mult=0.5,
+    )
+    assert no_atr.stop_price == pytest.approx(no_buffer.stop_price)
+
+
+def test_orb_vwap_r_multiple_target_is_off_by_default():
+    bars = _orb_bars()
+    bars.loc[bars.index[20], "close"] = 100.0
+    bars.loc[bars.index[21], "close"] = 102.0
+    orange = context.opening_range(bars, minutes=15)
+    vwap = context.session_vwap(bars)
+
+    default = orb_mod.evaluate_orb_vwap(bars.iloc[:22], orange, vwap.iloc[:22], vwap_side_filter=False)
+    assert default.target_price is None
+
+    targeted = orb_mod.evaluate_orb_vwap(
+        bars.iloc[:22], orange, vwap.iloc[:22], vwap_side_filter=False, target_r_multiple=2.0,
+    )
+    risk = targeted.entry_price - targeted.stop_price
+    assert risk > 0
+    assert targeted.target_price == pytest.approx(targeted.entry_price + 2.0 * risk)
+
+
 # ── l2_absorption (S4, bar-only proxy — see module docstring) ──────────────
 
 def _absorption_bars(n: int = 25, price: float = 100.0, band: float = 0.2) -> pd.DataFrame:
@@ -242,6 +312,32 @@ def test_l2_absorption_no_signal_when_level_is_cleanly_violated():
 def test_l2_absorption_no_signal_with_too_few_bars():
     bars = _absorption_bars(10, price=100.0, band=0.2)
     assert absorb_mod.evaluate_l2_absorption(bars) is None
+
+
+def test_l2_absorption_r_multiple_target_is_off_by_default():
+    bars = _absorption_bars(25, price=100.0, band=0.2)
+    bars.loc[bars.index[24], ["open", "high", "low", "close", "volume"]] = [100.0, 100.1, 99.8, 100.05, 10000.0]
+
+    default = absorb_mod.evaluate_l2_absorption(bars)
+    assert default.target_price is None
+    assert default.context["target_r_multiple"] is None
+
+    targeted = absorb_mod.evaluate_l2_absorption(bars, target_r_multiple=2.0)
+    risk = targeted.entry_price - targeted.stop_price
+    assert risk > 0
+    assert targeted.target_price == pytest.approx(targeted.entry_price + 2.0 * risk)
+    assert targeted.context["target_r_multiple"] == 2.0
+
+
+def test_l2_absorption_r_multiple_target_short_direction():
+    bars = _absorption_bars(25, price=100.0, band=0.2)
+    bars.loc[bars.index[24], ["open", "high", "low", "close", "volume"]] = [100.0, 100.2, 99.9, 99.95, 10000.0]
+
+    targeted = absorb_mod.evaluate_l2_absorption(bars, target_r_multiple=1.5)
+    assert targeted.direction == "short"
+    risk = targeted.stop_price - targeted.entry_price
+    assert risk > 0
+    assert targeted.target_price == pytest.approx(targeted.entry_price - 1.5 * risk)
 
 
 def test_l2_absorption_future_bars_do_not_affect_earlier_signal_no_lookahead():

@@ -95,6 +95,12 @@ class ExecutionGateway:
         # `auto_execute` existed in config with NO code reading it at all;
         # see tests/test_config_enforcement.py for the regression test).
         self._auto_execute_strategies: set = auto_execute_strategies or set()
+        # Market-conditional live gate catalog (python/analytics/gate_policy.py).
+        # Off by default so unit tests that only check auto_execute keep
+        # working; EngineRuntime enables it for paper sessions.
+        self._gate_policy_enabled: bool = False
+        self._market_regime: str = "undecided"
+        self._market_vol: str = "unknown"
         # flatten_intraday_positions/_close_position have no RiskEngine
         # (they act on already-open broker positions, not a fresh
         # signal->snapshot pipeline) so they need their OWN price source to
@@ -115,6 +121,25 @@ class ExecutionGateway:
 
     def _strategy_may_auto_execute(self, strategy_name: str) -> bool:
         return self.mode == "auto" and strategy_name in self._auto_execute_strategies
+
+    def enable_gate_policy(self, enabled: bool = True) -> None:
+        self._gate_policy_enabled = bool(enabled)
+
+    def set_market_regime(self, regime: str) -> None:
+        self._market_regime = str(regime)
+
+    def set_market_vol(self, vol: str) -> None:
+        self._market_vol = str(vol)
+
+    def set_market_features(self, regime: str, vol: str) -> None:
+        self._market_regime = str(regime)
+        self._market_vol = str(vol)
+
+    def _entry_allowed_by_gate_policy(self, strategy_name: str) -> tuple[bool, str]:
+        if not self._gate_policy_enabled:
+            return True, "gate_policy_disabled"
+        from python.analytics.gate_policy import live_order_permitted
+        return live_order_permitted(strategy_name, self._market_regime, self._market_vol)
 
     def set_mode(self, mode: str) -> None:
         """Runtime toggle for the gateway-level auto/observe gate — used by
@@ -206,6 +231,11 @@ class ExecutionGateway:
             )
             await self._publish_report(order, accepted=False, reason="observe_mode")
             return
+        policy_ok, policy_reason = self._entry_allowed_by_gate_policy(order.raw.strategy)
+        if not policy_ok:
+            log.info("ExecutionGateway: gate_policy blocked %s (%s)", order.raw.strategy, policy_reason)
+            await self._publish_report(order, accepted=False, reason=f"gate_policy:{policy_reason}")
+            return
 
         side_a = order.raw.entry_side_a
         side_b = order.raw.entry_side_b
@@ -236,6 +266,11 @@ class ExecutionGateway:
                 len(order.target_shares),
             )
             await self._publish_report(order, accepted=False, reason="observe_mode")
+            return
+        policy_ok, policy_reason = self._entry_allowed_by_gate_policy(order.raw.strategy)
+        if not policy_ok:
+            log.info("ExecutionGateway: gate_policy blocked %s (%s)", order.raw.strategy, policy_reason)
+            await self._publish_report(order, accepted=False, reason=f"gate_policy:{policy_reason}")
             return
 
         results = {}
@@ -303,6 +338,11 @@ class ExecutionGateway:
             log.info("ExecutionGateway: observe mode (gateway_mode=%s, strategy=%s) — "
                      "not submitting micro order for %s", self.mode, order.raw.strategy, symbol)
             await self._publish_report(order, accepted=False, reason="observe_mode")
+            return
+        policy_ok, policy_reason = self._entry_allowed_by_gate_policy(order.raw.strategy)
+        if not policy_ok:
+            log.info("ExecutionGateway: gate_policy blocked %s (%s)", order.raw.strategy, policy_reason)
+            await self._publish_report(order, accepted=False, reason=f"gate_policy:{policy_reason}")
             return
 
         entry_side = "buy" if order.raw.direction == "long" else "sell"

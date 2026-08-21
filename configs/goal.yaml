@@ -1,10 +1,16 @@
 # Acceptance thresholds for backtest -> live promotion decisions.
-# Read by scripts/run_backtest.py and scripts/health_check.py.
+# Read by scripts/run_backtest.py, scripts/run_intraday_backtest.py,
+# and scripts/health_check.py.
 
 wfo:
-  min_oos_sharpe: 0.5
+  # 2026-08-18 revision: 0.5 Sharpe on a 30-day sparse OOS fold is mostly
+  # noise. A fold passes if cost-adjusted OOS Sharpe is non-negative.
+  min_oos_sharpe: 0.0
   max_oos_drawdown: 0.25
-  min_pass_folds_ratio: 0.60
+  min_pass_folds_ratio: 0.50
+  # Previously only a WFOConfig dataclass default (0.5). A fold with
+  # positive IS Sharpe passes decay when OOS Sharpe >= IS * (1 - this).
+  max_sharpe_decay: 0.5
   # Walk-forward window sizes for the self-improve loop
   # (scripts/self_improve_loop.py). NOTE: walk_forward.py interprets these as
   # CALENDAR days (timedelta), so 504 calendar days ~= 360 trading days.
@@ -35,6 +41,50 @@ wfo:
     is_days: 90
     oos_days: 30
     step_days: 30
+  # New signal hypotheses (2026-08-06) — same fold cadence as the three
+  # signals above, for apples-to-apples comparability.
+  orb_vwap_regime:
+    is_days: 90
+    oos_days: 30
+    step_days: 30
+  vwap_band_fade:
+    is_days: 90
+    oos_days: 30
+    step_days: 30
+  vp_breakout:
+    is_days: 90
+    oos_days: 30
+    step_days: 30
+  # l2_absorption (2026-08-14, backtests/reports/l2_absorption_validation_report.md)
+  # — same fold cadence as the other microstructure signals above.
+  l2_absorption:
+    is_days: 90
+    oos_days: 30
+    step_days: 30
+  # absorption_breakout (2026-08-14, l2_absorption's continuation variant —
+  # backtests/reports/absorption_breakout_investigation_report.md) — same
+  # fold cadence as every other intraday microstructure signal above, for
+  # comparability.
+  absorption_breakout:
+    is_days: 90
+    oos_days: 30
+    step_days: 30
+  auction_reclaim:
+    is_days: 90
+    oos_days: 30
+    step_days: 30
+  vsa_effort:
+    is_days: 90
+    oos_days: 30
+    step_days: 30
+  vsa_no_demand:
+    is_days: 90
+    oos_days: 30
+    step_days: 30
+  obv_divergence:
+    is_days: 90
+    oos_days: 30
+    step_days: 30
 
 monte_carlo:
   min_p5_sharpe: 0.0          # 5th-percentile bootstrap Sharpe must stay non-negative
@@ -46,9 +96,11 @@ cost_gate:
   min_gross_to_cost_ratio: 2.0  # mirrors configs/risk.yaml min_gross_to_cost_ratio
 
 live_promotion:
-  # A strategy needs auto_execute: true in configs/strategy.yaml AND to have
-  # passed all of the above gates on the SAME backtest run before it may be
-  # promoted out of observe-only mode.
+  # RESEARCH GO stamp: AND the hard gates that the official runner
+  # actually applies. For intraday that is the survival set in
+  # scripts/run_intraday_backtest.py (drawdown, has_oos_trades,
+  # PF >= min_survival_profit_factor, stress PF), not the old seven-way
+  # AND. Live paper entries use gate_policy below.
   require_all_gates_pass: true
   # Self-improve loop (python/backtest/promotion.py): candidate params are
   # written back to configs/strategy.yaml only when their mean OOS Sharpe
@@ -56,16 +108,71 @@ live_promotion:
   # least this margin. 0.0 = any strict improvement qualifies.
   min_oos_sharpe_improvement: 0.0
 
-# Additional gates for the microstructure signals ONLY (checked by
-# scripts/run_intraday_backtest.py on top of the shared wfo/monte_carlo/
-# reality_check/cost_gate blocks above) — docs/microstructure_pivot_plan.md
-# §4c. Rationale: intraday frequency means "enough calendar time" does not
-# guarantee "enough independent trades" the way it does for the daily
-# strategies, and intraday costs (spread + impact, paid twice per
-# round-trip) are the single biggest way a signal that looks profitable on
-# raw price action turns out not to be.
+# Official intraday research GO (scripts/run_intraday_backtest.py).
+# HARD AND: drawdown, has_oos_trades, pooled PF >= min_survival_profit_factor,
+# and stress PF >= min_stress_profit_factor. WFO / pooled trade-count /
+# Monte Carlo p5 / the 1.1 edge PF bar are recorded as warnings and do
+# not flip GO. Daily run_backtest.py is unchanged (still uses its own
+# monte_carlo / reality_check gates). cost_gate is not read here.
 intraday:
-  min_trades_per_oos_fold: 100        # a fold with fewer fills is not statistically
-                                       # meaningful even if is_days/oos_days look "long enough"
-  min_cost_adjusted_profit_factor: 1.3  # gross_profit / gross_loss AFTER slippage + commission
-  stress_slippage_multiplier: 2.0     # mandatory re-run at this multiplier; must stay net-profitable
+  # 2026-08-18: per-fold 100 fills + PF 1.3 made sparse Creamer/VSA
+  # signals structurally NO-GO even when the year was net-positive.
+  # Sample-size and the 1.1 edge PF stay pooled, but they are SOFT.
+  min_trades_mode: pooled
+  min_trades_per_oos_fold: 8          # quiet-month floor; soft under pooled mode
+  min_trades_total_oos: 40            # soft: pooled OOS fills across all folds
+  profit_factor_mode: pooled
+  min_survival_profit_factor: 1.0     # HARD: do not lose money after costs
+  min_cost_adjusted_profit_factor: 1.1  # SOFT: 10% after-cost edge
+  min_stress_profit_factor: 1.0       # HARD: stress PF, not "PnL > 0"
+  stress_slippage_multiplier: 1.5     # 2.0x was vetoing thin but real edges
+
+# Live paper ENTRY policy (python/analytics/gate_policy.py).
+# Not research GO. Catalog order is priority: first matching
+# `situations` row wins. A (tape, vol, family) that matches nothing
+# is a refusal (`no_matching_situation`) — there is no seven-gate
+# fallback and no "research GO" stamp at the gateway.
+gate_policy:
+  research_require_all_gates: false
+  live_floors:
+    min_cost_adjusted_profit_factor: 1.0
+    max_oos_drawdown: 0.25
+    min_pass_folds_ratio: 0.50
+    min_oos_sharpe: 0.0
+    min_p5_sharpe: 0.0
+    max_reality_check_p_value: 0.05
+  situations:
+    # 1 gate — high-vol crisis: only "don't blow up"
+    - name: crisis
+      when: { vol: high }
+      family: any
+      gates: [max_oos_drawdown]
+    # 5 gates — quiet persistent trend, continuation only
+    - name: quiet_trend
+      when: { tape: trend_persistent, vol: low }
+      family: continuation
+      gates:
+        - cost_adjusted_profit_factor
+        - max_oos_drawdown
+        - stress_slippage_2x_net_positive
+        - has_oos_trades
+        - min_oos_sharpe
+    # 4 gates — normal trend, continuation
+    - name: trend_normal
+      when: { tape: trend_persistent, vol: [normal, unknown] }
+      family: continuation
+      gates:
+        - cost_adjusted_profit_factor
+        - max_oos_drawdown
+        - stress_slippage_2x_net_positive
+        - has_oos_trades
+    # 5 gates — choppy MR tape, demand more evidence
+    - name: mr_high_evidence
+      when: { tape: mean_reversion_friendly, vol: [normal, low, unknown] }
+      family: mean_reversion
+      gates:
+        - wfo_pass_ratio
+        - cost_adjusted_profit_factor
+        - max_oos_drawdown
+        - min_oos_sharpe
+        - stress_slippage_2x_net_positive

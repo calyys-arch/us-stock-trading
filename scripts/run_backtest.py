@@ -181,8 +181,17 @@ def run_xsection(args) -> dict:
     with open("configs/goal.yaml", encoding="utf-8") as f:
         goal = yaml.safe_load(f)
 
+    # sufficient_sample_size is a SOFT/informational Chan's-rule check (see
+    # python/backtest/param_guard.py and optimize.py::preflight_check's
+    # docstring: "warns, does not raise ... a GO decision on a too-short
+    # window is still evidence, just weaker evidence"). It must NOT be folded
+    # into `gates`/`overall_pass` below — doing so would make this script
+    # reject an otherwise-passing, sufficiently-tested strategy purely for
+    # having a technically-short window, contradicting its own documented
+    # soft-gate contract (and scripts/run_intraday_backtest.py's/
+    # self_improve_loop.py's correct treatment of the same check). It is
+    # still recorded in the returned dict/report for visibility.
     gates = {
-        "sufficient_sample_size": sample_ok,
         "monte_carlo_p5_sharpe_nonneg": mc_result.sharpe.p5 >= goal["monte_carlo"]["min_p5_sharpe"],
         "reality_check_pass": rc_result.p_value <= goal["reality_check"]["max_p_value"],
     }
@@ -192,6 +201,7 @@ def run_xsection(args) -> dict:
         "data_label": data_label,
         "n_free_parameters": n_params,
         "n_trading_days": n_trading_days,
+        "sufficient_sample_size": sample_ok,
         "sharpe_annualized": result.sharpe_annualized,
         "max_drawdown": result.max_drawdown,
         "cagr": result.cagr,
@@ -292,8 +302,10 @@ def run_pairs(args) -> dict:
     with open("configs/goal.yaml", encoding="utf-8") as f:
         goal = yaml.safe_load(f)
 
+    # sufficient_sample_size is SOFT/informational only — see the identical
+    # rationale/comment in run_xsection() above. Kept out of `gates` so it
+    # cannot flip `overall_pass` to NO-GO purely on a short-window technicality.
     gates = {
-        "sufficient_sample_size": sample_ok,
         "has_trades": len(report.trades) > 0,
         "monte_carlo_p5_sharpe_nonneg": mc_result.sharpe.p5 >= goal["monte_carlo"]["min_p5_sharpe"],
     }
@@ -304,6 +316,7 @@ def run_pairs(args) -> dict:
         "data_label": data_label,
         "n_free_parameters": n_params,
         "n_trading_days": n_trading_days,
+        "sufficient_sample_size": sample_ok,
         "n_trades": len(report.trades),
         "total_net_pnl": metrics["total_net_pnl"],
         "win_rate": metrics["win_rate"],

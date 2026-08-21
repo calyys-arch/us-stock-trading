@@ -6,14 +6,30 @@
 # submit any order (ExecutionGateway.mode must be "auto" AND this flag must
 # be true — tests/test_config_enforcement.py verifies BOTH gates are read).
 
+# The scanned-universe variant of this strategy (point-in-time cointegration
+# scan over configs/pairs_universe.yaml instead of one hardcoded pair) is an
+# OPT-IN backtest path, not a behavior change to this block: see
+# python/backtest/pairs_scan_engine.py, run it with
+# scripts/run_pairs_scan_backtest.py, results in
+# backtests/reports/pairs_scan_report.md. It deliberately adds NO key here —
+# its only structural constants (concurrent-pair cap, assumed half-spread)
+# are pinned a-priori in code, because this block is already exactly at the
+# Chan Ch.3 five-free-parameter ceiling.
 pairs_trading:
   enabled: true
-  auto_execute: false
-  entry_z: 2.0
+  # PAPER forward experiment, regime-gated — NOT a WFO GO promotion.
+  # Armed only when the trend-efficiency gate says mean-reversion-friendly
+  # (automatically OFF in a 2024–2026-like bull/trend). See
+  # backtests/reports/pairs_regime_live_protocol.md and
+  # backtests/reports/regime_generalization_report.md §2b (2022 GO,
+  # low-frequency entry_z=4.0).
+  auto_execute: true
+  entry_z: 4.0                   # frozen 2022 GO low-frequency config (was 2.0 baseline)
   exit_z: 0.5
   coint_lookback_days: 252
   revalidate_every_days: 21
-  notional_per_leg: 50000.0
+  notional_per_leg: 50000.0      # backtest/research sizing — live paper uses paper_notional_per_leg
+  paper_notional_per_leg: 3000.0 # paper-forward-test sizing (operational, not a free parameter)
   half_life_multiplier_max_hold: 3.0
   min_half_life_days: 1.0
   max_half_life_days: 60.0
@@ -59,22 +75,186 @@ orb_vwap:
   auto_execute: false
   or_minutes: 15                # opening-range window length
   vwap_side_filter: true        # require close on the same side of session VWAP as the breakout
+  # Cost-to-edge levers added by the 2026-08-13 rescue investigation
+  # (backtests/reports/orb_vwap_rescue_report.md). All three default to the
+  # pre-investigation behavior, so this block's LIVE behavior is unchanged;
+  # they exist so the levers are explicit, gridable options rather than
+  # silent edits to the signal. NOTE: the rescue report's verdict is NO-GO —
+  # nothing here has been promoted, and `auto_execute` stays false.
+  max_entries_per_session: null # null = unlimited re-entries (as before); 1 = first qualifying break only
+  stop_atr_buffer_mult: 0.0     # 0.0 = raw OR extreme stop (as before); >0 widens it by that many ATR14
+  target_r_multiple: null       # null = no profit target (as before); e.g. 2.0 = 2R target
+  allow_overnight: false
+  flatten_buffer_minutes: 5
+
+# New signal hypotheses (2026-08-06, backtests/reports/new_signals_report.md).
+# Same report-only / observe-mode discipline as the three signals above:
+# auto_execute stays false until a real WFO/MC/2x-stress GO decision exists.
+
+orb_vwap_regime:
+  enabled: true
+  auto_execute: false
+  or_minutes: 15                # opening-range window length (identical knob to orb_vwap)
+  vwap_side_filter: true        # require close on the same side of session VWAP as the breakout
+  # Regime gate ("only trade orb_vwap's pattern on trending, i.e. non-Sideways,
+  # days" per python/analytics/regime.py) is a HARDCODED STRUCTURAL RULE, not
+  # a config knob here — see python/microstructure/signals/orb_vwap_regime.py's
+  # module docstring for why (Chan discipline: 0 new free parameters vs orb_vwap).
+  allow_overnight: false
+  flatten_buffer_minutes: 5
+
+vwap_band_fade:
+  enabled: true
+  auto_execute: false
+  band_sigma_mult: 2.0           # which VWAP band multiple must be pierced to qualify as "extended"
+  stall_bars: 3                  # bars without a new extension extreme required before fading
+  stop_atr_mult: 0.5             # stop placed this many ATRs beyond the extension extreme
+  # Target is session VWAP itself — not a config knob (see vwap_band_fade.py's module docstring).
+  allow_overnight: false
+  flatten_buffer_minutes: 5
+
+vp_breakout:
+  enabled: true
+  auto_execute: false
+  vol_mult: 2.0                  # breakout bar volume must exceed this x the trailing rolling average
+  confirm_bars: 2                # bars price must hold outside the value area before entry
+  stop_atr_mult: 0.5             # stop placed this many ATRs back inside the value area
+  # Target is the next liquidity pool level in the breakout direction
+  # (context.py's target_resistance_levels/target_support_levels) — not a
+  # config knob, see vp_breakout.py's module docstring.
   allow_overnight: false
   flatten_buffer_minutes: 5
 
 # S4 — L2 Absorption/Iceberg (Phase 3, docs/microstructure_pivot_plan.md §1).
 # BAR-ONLY PROXY (see python/microstructure/signals/l2_absorption.py's module
-# docstring): no real L2 depth confirmation yet. `enabled: true` here only
-# controls dashboard chart-overlay detection (dashboard/app.py's
-# /api/chart/{symbol}/context) — this signal is DELIBERATELY NOT in
-# scripts/run_intraday_backtest.py's SIGNALS list, so it can never earn a
-# WFO "GO"/get promoted; `auto_execute` staying false is not the only
-# safety net here, it genuinely cannot be backtested for real yet.
+# docstring): no real L2 depth confirmation yet (data/ticks/ and data/depth/
+# postdate the cached 1-minute OHLCV history this signal is validated
+# against, so an L2-confirmed version cannot be built yet either way).
+# `enabled: true` here controls dashboard chart-overlay detection
+# (dashboard/app.py's /api/chart/{symbol}/context); it is EXCLUDED from
+# dashboard/live_microstructure_scheduler.py's LIVE_SIGNALS regardless of
+# its WFO verdict (see that module's docstring) — the bar-only-proxy caveat
+# is permanent, independent of the WFO gate result below.
+# WFO/promotion-gate status (2026-08-14): see
+# backtests/reports/l2_absorption_validation_report.md and
+# backtests/reports/signal_status.md — this signal now HAS been run through
+# scripts/run_intraday_backtest.py's WFO/Monte Carlo/cost-adjusted-PF gate
+# (`--signal l2_absorption`), unlike when this comment previously said it
+# never would be.
 l2_absorption:
   enabled: true
   auto_execute: false
   volume_mult: 3.0               # bar volume must exceed this x the 20-bar average to count as "absorption"
   touch_atr_mult: 0.25           # how close (in ATR) the bar's low/high must sit to the tested level
   stop_atr_mult: 0.5             # stop placed this many ATRs beyond the defended level
+  # target_r_multiple: same lever as orb_vwap's rescue investigation
+  # (backtests/reports/orb_vwap_rescue_report.md) — added 2026-08-14 for
+  # l2_absorption's own validation. null = no target (as before), winner
+  # cut only by the time-stop/EOD flatten; e.g. 2.0 = 2R target.
+  target_r_multiple: null
   allow_overnight: false
   flatten_buffer_minutes: 5
+
+# NEW signal (2026-08-14) — Absorption Failure / Breakout Continuation, the
+# genuine "Option A" investigation from l2_absorption's retirement pivot
+# list (backtests/reports/absorption_breakout_investigation_report.md,
+# backtests/reports/signal_status.md). Same level/volume-spike definitions
+# as l2_absorption (untouched above, still RETIRED) but trades CONTINUATION
+# in the break direction instead of a fade/bounce — see
+# python/microstructure/signals/absorption_breakout.py's module docstring.
+# PAPER forward experiment on the frozen NO-GO-but-closest candidate
+# (TIGHT6 + breakout_atr_mult=0.5 + round-3 macro beta gate). This is NOT
+# a WFO GO promotion — see
+# backtests/reports/absorption_breakout_paper_protocol.md and
+# backtests/reports/absorption_breakout_investigation_report.md.
+# Live universe is the frozen TIGHT6 list; the macro beta gate is a
+# hardcoded structural rule (fail-closed on missing QQQ/SPY/XLK 1m), not
+# a new tunable knob.
+absorption_breakout:
+  enabled: true
+  auto_execute: true              # paper-forward-test only; NOT a WFO GO promotion
+  volume_mult: 3.0                # frozen B5 / E1 winner (unmodified baseline)
+  breakout_atr_mult: 0.5          # frozen Lever 2 — beyond the grid's tested ceiling
+  stop_atr_mult: 0.5              # frozen B5 / E1 winner (unmodified baseline)
+  live_universe:                  # frozen TIGHT6 — do not expand during the test
+    - AAPL
+    - GOOGL
+    - NVDA
+    - MSFT
+    - PLTR
+    - INTC
+  # target_r_multiple: same lever as l2_absorption's/orb_vwap's own lever of
+  # the same name. null = no target (winner cut only by the time-stop/EOD
+  # flatten); e.g. 2.0 = 2R target.
+  target_r_multiple: null
+  # micro_stop_cents (round 2, 2026-08-14 — backtests/reports/
+  # absorption_breakout_investigation_report.md's dated addendum): ALTERNATIVE
+  # to stop_atr_mult above, not additive with it (only one is ever active per
+  # evaluation — see absorption_breakout.py's docstring). null = use
+  # stop_atr_mult's ATR-scaled stop (unchanged default behavior); e.g. 0.02 =
+  # a fixed 2-cent stop past the broken level instead. This is a genuine 5th
+  # free parameter under param_guard.py's counting (puts this signal AT the
+  # MAX_FREE_PARAMETERS=5 ceiling, no further headroom) even though it is
+  # mutually exclusive with stop_atr_mult in effect.
+  micro_stop_cents: null
+  allow_overnight: false
+  flatten_buffer_minutes: 5
+
+# NEW signal (2026-08-18) — Creamer-style auction reclaim on a 5-minute
+# chart (location, confirmation, ATR). 1-minute cache is only the resample
+# source. Uses options GEX + 5-minute footprint when those archives exist.
+# Research-only: auto_execute stays false until a WFO GO.
+auction_reclaim:
+  enabled: true
+  auto_execute: false
+  min_rel_volume: 1.2
+  min_wick_frac: 0.45
+  stop_atr_mult: 0.15
+  target_r_multiple: 1.5
+  allow_overnight: false
+  flatten_buffer_minutes: 5
+
+# NEW signal (2026-08-18) — Wyckoff/VSA effort-without-result on a
+# 5-minute chart (stopping volume + no-supply/no-demand test, outside
+# prior-session value area). Optional GEX is environment, not a knob.
+# Research-only: auto_execute stays false until a WFO GO.
+vsa_effort:
+  enabled: true
+  auto_execute: false
+  effort_vol_mult: 2.0
+  test_vol_mult: 0.85
+  stop_atr_mult: 0.20
+  target_r_multiple: 1.5
+  allow_overnight: false
+  flatten_buffer_minutes: 5
+
+# NEW signal (2026-08-18) — Williams/Coulling no-demand (short) and
+# no-selling-pressure (long) on a narrow 5-minute bar, confirmed by
+# the next bar's failure to continue. Research-only: auto_execute
+# stays false until a WFO GO.
+vsa_no_demand:
+  enabled: true
+  auto_execute: false
+  spread_atr_max: 0.55
+  vol_lookback: 2
+  stop_atr_mult: 0.20
+  target_r_multiple: 1.5
+  allow_overnight: false
+  flatten_buffer_minutes: 5
+
+# NEW signal (2026-08-18) — Granville B-2 / S-2: price makes a
+# lookback extreme that session On-Balance Volume does not confirm.
+# Research-only: auto_execute stays false until a WFO GO.
+obv_divergence:
+  enabled: true
+  auto_execute: false
+  lookback_bars: 8
+  obv_lag_frac: 0.25
+  stop_atr_mult: 0.20
+  target_r_multiple: 1.5
+  allow_overnight: false
+  flatten_buffer_minutes: 5
+
+# VSA / OBV research tests (7 gates each, compared on 1m/5m/15m) live
+# in configs/volume_route_strategies.yaml. They reuse the two signal
+# blocks above; they do not get their own auto_execute keys.

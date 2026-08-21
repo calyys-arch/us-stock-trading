@@ -1,0 +1,30 @@
+# VSA / OBV research routes — one test per gate, compared across charts.
+#
+# Each (route, chart) cell runs one WFO. The seven gates are then scored
+# separately (not ANDed, not 2^7 subsets). That is 7 VSA tests + 7 OBV
+# tests, each repeated on 1m / 5m / 15m. Official research GO is unchanged.
+# auto_execute stays false.
+#
+# Charts are decision-bar sizes. The raw feed is always 1-minute cache.
+# time_stop_minutes = max(10, 2 * chart_minutes).
+
+combination_mode: single_gates
+
+routes:
+  vsa:
+    signal: vsa_no_demand
+    charts: [1, 5, 15]
+  obv:
+    signal: obv_divergence
+    charts: [1, 5, 15]
+
+# Canonical seven-gate vector. Subset ids use the short names below,
+# joined in this order (e.g. wfo+dd+mc). Stress is PF >= 1 at 1.5x costs.
+gate_names:
+  - wfo_go
+  - oos_drawdown_within_limit
+  - has_oos_trades
+  - min_trades_per_oos_fold
+  - cost_adjusted_profit_factor
+  - monte_carlo_p5_sharpe
+  - stress_slippage_1.5x_pf_ge_1

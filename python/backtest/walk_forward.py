@@ -48,6 +48,17 @@ class WFOConfig:
     min_pass_folds_ratio: float = 0.60
     min_oos_sharpe_abs: float = 0.0
     max_sharpe_decay: float = 0.5   # OOS sharpe must be >= IS sharpe * (1 - max_sharpe_decay)
+    # False (default): ROLLING fixed-width IS window that SLIDES forward by
+    # step_days each fold — the original behavior, byte-identical for every
+    # existing caller (backtests/reports/regime_gate_robustness_report.md
+    # left this default untouched; it only reads it via a NEW, opt-in `True`
+    # value). True: ANCHORED/EXPANDING IS window — is_start stays fixed at
+    # the study's start date and is_end grows by step_days each fold instead
+    # of sliding. Both are standard, textbook walk-forward conventions
+    # (rolling vs. anchored/expanding walk-forward optimization — e.g. Pardo,
+    # "The Evaluation and Optimization of Trading Strategies", ch. 5), not a
+    # bespoke fold rule invented for one result.
+    anchored: bool = False
 
 
 @dataclass
@@ -128,8 +139,16 @@ class WalkForwardOptimizer:
 
         window_start = start
         while True:
-            is_start = window_start
-            is_end = is_start + timedelta(days=cfg.is_days)
+            if cfg.anchored:
+                # Anchored/expanding: IS always starts at the study's start;
+                # IS length grows by one step_days per fold (fold 0's IS is
+                # still exactly is_days long, matching the rolling case, so
+                # the two conventions are directly comparable fold-for-fold).
+                is_start = start
+                is_end = is_start + timedelta(days=cfg.is_days + fold_idx * cfg.step_days)
+            else:
+                is_start = window_start
+                is_end = is_start + timedelta(days=cfg.is_days)
             oos_end = is_end + timedelta(days=cfg.oos_days)
             if oos_end > end:
                 break

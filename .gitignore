@@ -29,6 +29,15 @@ data/history/
 data/history_1m/
 data/ticks/
 data/depth/
+# scripts/snapshot_gex.py — naive options GEX as-of capture day. No
+# historical backfill exists; regenerable going forward only.
+data/gex/
+# python/microstructure/signal_journal.py's append-only live signal
+# journal — accumulated evidence (docs/microstructure_pivot_plan.md §7),
+# not reproducible from anything else on disk, but still runtime OUTPUT
+# rather than checked-in source, same "not committed" posture as the
+# rest of this data/ block.
+data/signal_journal/
 # scripts/sync_uhai.py's offline export + watermark — regenerable, and
 # points at whatever UHAI_GREYCAT_URL happens to be configured locally.
 data/uhai_sync/

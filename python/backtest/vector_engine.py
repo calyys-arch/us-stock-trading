@@ -30,7 +30,7 @@ from datetime import datetime
 import numpy as np
 import pandas as pd
 
-from ..core.fees_equity import commission, market_impact
+from ..core.fees_equity import commission, half_spread_cost, market_impact
 from ..core.strategies.portfolio_base import PortfolioStrategy
 from ..core.types import PortfolioTarget
 
@@ -76,7 +76,17 @@ def run_vector_backtest(
     universe_by_day: dict,             # {date: [codes]} — point-in-time eligible universe
     capital: float = 1_000_000.0,
     impact_coefficient_bps: float = 10.0,
+    half_spread_bps: float | dict[str, float] | None = None,
 ) -> VectorBacktestResult:
+    """`half_spread_bps` is OPTIONAL and backward-compatible: `None` (the
+    default) reproduces the exact pre-existing behavior byte-for-byte — no
+    spread cost charged, same as every caller before this parameter existed
+    (`backtests/reports/alt_universe_frequency_exploration.md` Track 1 is
+    the first caller to pass it). Pass either a single flat bps number
+    (applied to every symbol) or a `{code: bps}` dict (per-symbol, falling
+    back to 0.0 for any code missing from the dict) — charged on BOTH the
+    entry (open) and exit (close) leg, same double-charging convention as
+    `commission`/`market_impact` two lines below."""
     dates = sorted(universe_by_day.keys())
     required_cols = {"open", "close"}
     missing = required_cols - set(ohlc_panel.columns)
@@ -146,6 +156,12 @@ def run_vector_backtest(
             exit_comm = commission(signed_shares, close_px)
             impact = market_impact(notional, adv, impact_coefficient_bps) * 2  # entry + exit
             day_cost += entry_comm + exit_comm + impact
+
+            if half_spread_bps is not None:
+                bps = half_spread_bps.get(code, 0.0) if isinstance(half_spread_bps, dict) else half_spread_bps
+                entry_notional = shares * open_px
+                exit_notional = shares * close_px
+                day_cost += half_spread_cost(entry_notional, bps) + half_spread_cost(exit_notional, bps)
 
         gross_returns[as_of] = day_pnl / capital
         net_returns[as_of] = (day_pnl - day_cost) / capital

@@ -32,6 +32,16 @@ xsection_mean_reversion:
 # stay coarse (2-3 values/axis) for the same reason as above, and are
 # doubly important here: intraday signals have far more room to overfit
 # noise than a daily strategy given how many bars there are per day.
+#
+# RETIRED (2026-08-13): all six grids below (sweep_reclaim, fvg_retest,
+# orb_vwap, orb_vwap_regime, vwap_band_fade, vp_breakout) belong to signals
+# confirmed NO-GO with no remaining unexplored rescue angle — see
+# backtests/reports/strategy_review_summary.md and
+# backtests/reports/orb_vwap_rescue_report.md. They are kept here, UNCHANGED,
+# so an explicit re-run (scripts/run_intraday_backtest.py --signal <name>)
+# still works and stays tested; scripts/run_intraday_backtest.py's
+# RETIRED_SIGNALS excludes them from that script's default/batch run modes.
+# Single-page status manifest: backtests/reports/signal_status.md.
 
 sweep_reclaim:
   sweep_min_atr: [0.10, 0.15, 0.20]
@@ -46,3 +56,80 @@ fvg_retest:
 orb_vwap:
   or_minutes: [5, 15, 30]
   vwap_side_filter: [true, false]
+  # max_entries_per_session / stop_atr_buffer_mult / target_r_multiple exist in
+  # configs/strategy.yaml (2026-08-13 rescue investigation) but are deliberately
+  # NOT gridded here: crossing them with the two axes above would turn a
+  # 6-candidate coarse grid into a 100+ candidate one over a ~12-month window,
+  # which is the exact curve-fitting this file's header rules out. The rescue
+  # investigation set them explicitly, one lever at a time
+  # (scripts/_orb_vwap_rescue.py), and its verdict was NO-GO — see
+  # backtests/reports/orb_vwap_rescue_report.md.
+
+# New signal hypotheses (2026-08-06, backtests/reports/new_signals_report.md).
+# Same coarse-grid discipline as above.
+
+orb_vwap_regime:
+  # Identical grid to orb_vwap (0 new free parameters — the regime gate is
+  # a hardcoded rule, see configs/strategy.yaml's comment on this block).
+  or_minutes: [5, 15, 30]
+  vwap_side_filter: [true, false]
+
+vwap_band_fade:
+  band_sigma_mult: [1.5, 2.0, 2.5]
+  stall_bars: [2, 3, 5]
+  stop_atr_mult: [0.35, 0.5, 0.75]
+
+vp_breakout:
+  vol_mult: [1.5, 2.0, 3.0]
+  confirm_bars: [1, 2, 3]
+  stop_atr_mult: [0.35, 0.5, 0.75]
+
+# l2_absorption (S4, Phase 3, 2026-08-14) — the last untested microstructure
+# signal (backtests/reports/l2_absorption_validation_report.md). Same
+# coarse-grid discipline as above. `target_r_multiple` is deliberately NOT
+# gridded here (same reason orb_vwap's rescue levers aren't in its grid
+# above): it is a lever tested one-at-a-time by
+# scripts/_l2_absorption_validation.py on top of whatever this grid finds,
+# not crossed into a 4-axis combinatorial grid.
+l2_absorption:
+  volume_mult: [2.0, 3.0, 4.0]
+  touch_atr_mult: [0.15, 0.25, 0.35]
+  stop_atr_mult: [0.35, 0.5, 0.75]
+
+# absorption_breakout (2026-08-14) — l2_absorption's "Option A" continuation
+# variant (backtests/reports/absorption_breakout_investigation_report.md).
+# Same coarse-grid discipline as above. `target_r_multiple` deliberately NOT
+# gridded here, same reasoning as l2_absorption's own grid comment.
+absorption_breakout:
+  volume_mult: [2.0, 3.0, 4.0]
+  breakout_atr_mult: [0.0, 0.15, 0.3]
+  stop_atr_mult: [0.35, 0.5, 0.75]
+
+# auction_reclaim (2026-08-18) — Creamer-style 5-minute auction reclaim.
+# target_r_multiple stays at the yaml default (1.5, his stated 1.5–2R
+# working range) and is not gridded, same convention as absorption_breakout.
+auction_reclaim:
+  min_rel_volume: [1.0, 1.4]
+  min_wick_frac: [0.40, 0.50]
+  stop_atr_mult: [0.10, 0.25]
+
+# vsa_effort (2026-08-18) — Wyckoff/VSA effort-without-result.
+# target_r_multiple stays at the yaml default (1.5) and is not gridded.
+vsa_effort:
+  effort_vol_mult: [1.6, 2.4]
+  test_vol_mult: [0.70, 0.90]
+  stop_atr_mult: [0.15, 0.30]
+
+# vsa_no_demand (2026-08-18) — Williams/Coulling least-resistance.
+# target_r_multiple stays at the yaml default (1.5) and is not gridded.
+vsa_no_demand:
+  spread_atr_max: [0.40, 0.70]
+  vol_lookback: [2, 3]
+  stop_atr_mult: [0.15, 0.30]
+
+# obv_divergence (2026-08-18) — Granville B-2 / S-2.
+# target_r_multiple stays at the yaml default (1.5) and is not gridded.
+obv_divergence:
+  lookback_bars: [6, 10]
+  obv_lag_frac: [0.20, 0.35]
+  stop_atr_mult: [0.15, 0.30]

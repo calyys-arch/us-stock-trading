@@ -22,6 +22,15 @@ schedules change periodically — see comments for source/vintage):
      impact_bps = impact_coefficient * sqrt(order_notional / adv_dollars).
      This is a MODEL, not a guarantee — backtest reports must show the
      sensitivity of results to this coefficient (see chan_guards tests).
+  6. Bid-ask half-spread — crossing the spread costs roughly half the quoted
+     spread per fill, paid on BOTH the entry and the exit. Priced in bps of
+     traded notional, the same unit
+     python/backtest/intraday_engine.py's `half_spread_bps` uses and the same
+     unit scripts/calibrate_slippage_spreads.py calibrates from real captured
+     L2 depth (backtests/reports/calibrated_spreads.json). Defaults to 0.0
+     here so pre-existing callers keep their previous (spread-free) behavior
+     unchanged; callers that model spread must pass it EXPLICITLY and state
+     the assumed value in their report.
 
 All rates below are named constants (not magic numbers) so they can be
 updated in one place when regulatory schedules change.
@@ -50,10 +59,12 @@ class TradeCostBreakdown:
     finra_taf: float
     borrow_cost: float
     market_impact: float
+    half_spread: float = 0.0
 
     @property
     def total(self) -> float:
-        return self.commission + self.sec_fee + self.finra_taf + self.borrow_cost + self.market_impact
+        return (self.commission + self.sec_fee + self.finra_taf
+                + self.borrow_cost + self.market_impact + self.half_spread)
 
 
 def commission(shares: int, price: float) -> float:
@@ -105,6 +116,16 @@ def market_impact(
     return order_notional * (impact_bps / 10_000.0)
 
 
+def half_spread_cost(notional: float, half_spread_bps: float) -> float:
+    """Cost of crossing half the quoted bid-ask spread on `notional` of
+    traded value. Zero `half_spread_bps` means "spread not modeled" — that
+    is a real modeling gap, not a zero-cost market, and callers should say
+    so in their report rather than leaving it implicit."""
+    if notional <= 0 or half_spread_bps <= 0:
+        return 0.0
+    return notional * (half_spread_bps / 10_000.0)
+
+
 def round_trip_cost(
     shares: int,
     entry_price: float,
@@ -113,10 +134,12 @@ def round_trip_cost(
     holding_days: float = 0.0,
     adv_dollars: float = 0.0,
     annual_borrow_rate: float = DEFAULT_ANNUAL_BORROW_RATE_EASY_TO_BORROW,
+    half_spread_bps: float = 0.0,
 ) -> TradeCostBreakdown:
     """Full round-trip cost for one position: entry commission+fees, exit
-    commission+fees, borrow cost (if short), and market impact on both legs.
-    `is_short` determines which leg is the SELL leg for SEC/FINRA fee
+    commission+fees, borrow cost (if short), market impact on both legs, and
+    (when `half_spread_bps` is supplied) the bid-ask half-spread paid on both
+    legs. `is_short` determines which leg is the SELL leg for SEC/FINRA fee
     purposes (open-short = sell first, close-short = buy to cover)."""
     entry_side = "sell" if is_short else "buy"
     exit_side = "buy" if is_short else "sell"
@@ -129,6 +152,8 @@ def round_trip_cost(
     total_taf = finra_taf(shares, entry_side) + finra_taf(shares, exit_side)
     borrow = short_borrow_cost(entry_notional, holding_days, annual_borrow_rate) if is_short else 0.0
     impact = market_impact(entry_notional, adv_dollars) + market_impact(exit_notional, adv_dollars)
+    spread = (half_spread_cost(entry_notional, half_spread_bps)
+              + half_spread_cost(exit_notional, half_spread_bps))
 
     return TradeCostBreakdown(
         commission=total_commission,
@@ -136,4 +161,5 @@ def round_trip_cost(
         finra_taf=total_taf,
         borrow_cost=borrow,
         market_impact=impact,
+        half_spread=spread,
     )

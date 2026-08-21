@@ -104,6 +104,24 @@ def test_rejected_when_not_beating_incumbent(config_path, tmp_path):
     assert record.config_written is False
 
 
+def test_rejected_when_improvement_exactly_equals_min_improvement_boundary(config_path, tmp_path):
+    """Regression for the 2026-08-15 round-2 audit
+    (backtests/reports/backtest_engine_audit_round2.md): with a NON-zero
+    `min_improvement`, an improvement EXACTLY AT the threshold must still
+    be REJECTED (configs/goal.yaml's own comment on
+    `live_promotion.min_oos_sharpe_improvement`: "any STRICT improvement
+    qualifies" — a tie at the margin is not a strict improvement), and an
+    improvement even one float ULP above it must PROMOTE. This is the
+    off-by-one boundary check the audit brief specifically asked for."""
+    exact = _promote(config_path, tmp_path / "exact.jsonl",
+                      candidate_oos_sharpe=0.7, baseline_oos_sharpe=0.5, min_improvement=0.2)
+    assert exact.decision == "REJECTED"
+
+    just_above = _promote(config_path, tmp_path / "above.jsonl",
+                          candidate_oos_sharpe=0.70001, baseline_oos_sharpe=0.5, min_improvement=0.2)
+    assert just_above.decision == "PROMOTED"
+
+
 def test_rejected_when_candidate_equals_baseline(config_path, tmp_path):
     record = _promote(config_path, tmp_path / "h.jsonl",
                       candidate_params={"entry_z": 2.0}, baseline_params={"entry_z": 2.0})

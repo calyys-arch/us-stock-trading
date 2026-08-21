@@ -9,10 +9,13 @@ Promotion policy (user-confirmed, 2026-07-28 — "auto_write" option):
      has-trades + Monte Carlo p5; Reality Check where the caller supplies
      it). A candidate that fails ANY gate is rejected regardless of Sharpe.
   2. The candidate's mean OOS Sharpe must beat the CURRENT config's mean
-     OOS Sharpe — measured on the SAME folds and data — by at least
-     goal.yaml live_promotion.min_oos_sharpe_improvement. "New params won
-     the grid search" is not enough; they must beat the incumbent
-     out-of-sample or the incumbent stays.
+     OOS Sharpe — measured on the SAME folds and data — by STRICTLY MORE
+     than goal.yaml live_promotion.min_oos_sharpe_improvement (an
+     improvement numerically EQUAL to the margin does NOT qualify — see
+     that config key's own comment: "0.0 = any strict improvement
+     qualifies", i.e. a tied/zero-improvement candidate must never
+     promote). "New params won the grid search" is not enough; they must
+     beat the incumbent out-of-sample or the incumbent stays.
   3. Only strategy PARAMETERS are ever written. auto_execute / enabled are
      NEVER touched by this module — going live remains a human decision
      (configs/strategy.yaml's observe-mode contract).
@@ -137,8 +140,18 @@ def evaluate_and_promote(
     elif candidate_params == baseline_params:
         decision, reason = "REJECTED", "candidate equals current config (no change to promote)"
     elif improvement <= min_improvement:
+        # Deliberately "<=", not "<": verified during the 2026-08-15
+        # round-2 audit (backtests/reports/backtest_engine_audit_round2.md)
+        # against configs/goal.yaml's own comment on
+        # `live_promotion.min_oos_sharpe_improvement` — "0.0 = any STRICT
+        # improvement qualifies" — which is the authoritative statement of
+        # intent for this boundary, and explicitly requires improvement >
+        # min_improvement (a tie must NOT promote), not >=. This class's
+        # OWN docstring above ("beat it by at least...") is the imprecise
+        # one; worded more carefully there instead of changing this
+        # comparison — see that docstring update in the same commit.
         decision, reason = "REJECTED", (
-            f"OOS Sharpe improvement {improvement:+.3f} does not beat incumbent by "
+            f"OOS Sharpe improvement {improvement:+.3f} does not strictly beat incumbent by "
             f"more than {min_improvement:+.3f}"
         )
     else:

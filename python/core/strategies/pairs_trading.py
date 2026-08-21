@@ -20,6 +20,21 @@ settings such as coint_lookback_days and notional_per_leg):
 That's exactly 5 — AT the parameter budget, not under it. Any new knob
 requires removing one of these first.
 
+Exit-rule ablations (2026-08-13, python/backtest/pairs_scan_engine.py) were
+designed against that constraint and all remain OFF by default:
+  - dynamic half-life re-estimation and the cointegration-breakdown exit add
+    NO parameter: the first changes how (3) is applied, the second is a
+    boolean with no threshold.
+  - the z-widening stop is derived as `entry_z * STOP_Z_MULTIPLE` with the
+    multiple pinned a-priori, and was tested only in the configuration where
+    it REPLACES (3) — the stale timeout is disabled, so the stop becomes the
+    "thesis has failed" exit and the count stays at 5. Enabling it is also a
+    documented POLICY change (Chan argues against price stops for mean
+    reversion; see pair_position_manager.py) and needs human sign-off
+    separately from any numeric result.
+Measured outcome: none improved the verdict. See
+`backtests/reports/pairs_scan_report.md` §2026-08-13.
+
 This strategy MAY hold positions overnight — Chan's own pairs examples
 (GLD/GDX, GLD/USO) have half-lives of days to weeks, not minutes, and
 forcing an intraday-only exit would truncate the reversion before it

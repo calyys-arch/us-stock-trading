@@ -27,6 +27,15 @@ not a strategy's statistically-fit free parameter (same classification
 rationale as `coint_lookback_days` in python/backtest/param_guard.py's
 _NON_PARAMETER_KEYS) — they do not count against either strategy's 5-
 parameter Chan Ch.3 budget.
+
+`rank_by_trailing_dollar_volume` / `band_by_trailing_dollar_volume` (added
+2026-08-13, `backtests/reports/alt_universe_frequency_exploration.md`)
+generalize the same ranking to return the FULL ordering, or an arbitrary
+[start, end) rank BAND rather than only a top-K cutoff — used to select a
+deliberately less-liquid-than-top-K slice (e.g. "not mega-cap, not
+micro-cap") of a point-in-time candidate pool, mechanically and without ever
+looking at any strategy's returns. `top_by_trailing_dollar_volume` itself is
+unchanged.
 """
 from __future__ import annotations
 
@@ -90,6 +99,49 @@ def top_by_trailing_dollar_volume(
     eligible = dollar_volume[dollar_volume.index.isin(candidates)]
     ranked = eligible.sort_values(ascending=False)
     return ranked.head(top_k).index.tolist()
+
+
+def rank_by_trailing_dollar_volume(
+    candidates: list[str],
+    price_panel: pd.DataFrame,
+    as_of: datetime,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+) -> pd.Series:
+    """Same ranking as `top_by_trailing_dollar_volume` but returns the FULL
+    descending-sorted Series (code -> mean dollar volume) instead of only
+    the head. Needed for a liquidity-BAND selection (e.g. ranks 150-220)
+    rather than a top-K cutoff — same strictly-before-`as_of` window, same
+    look-ahead discipline, just no truncation."""
+    all_dates = price_panel.index.get_level_values(0)
+    window = price_panel.loc[all_dates < pd.Timestamp(as_of)]
+    if window.empty:
+        return pd.Series(dtype=float)
+
+    unique_dates = window.index.get_level_values(0).unique().sort_values()
+    recent_dates = unique_dates[-lookback_days:]
+    recent = window.loc[window.index.get_level_values(0).isin(recent_dates)]
+
+    dollar_volume = (recent["close"] * recent["volume"]).groupby(level=1).mean()
+    eligible = dollar_volume[dollar_volume.index.isin(candidates)]
+    return eligible.sort_values(ascending=False)
+
+
+def band_by_trailing_dollar_volume(
+    candidates: list[str],
+    price_panel: pd.DataFrame,
+    as_of: datetime,
+    band_start_rank: int,
+    band_end_rank: int,
+    lookback_days: int = DEFAULT_LOOKBACK_DAYS,
+) -> list[str]:
+    """Return the codes at ranks [`band_start_rank`, `band_end_rank`)
+    (1-indexed, most-liquid-first) of the trailing-dollar-volume ordering —
+    a LIQUIDITY BAND rather than a top-K cutoff. Used to select a
+    deliberately less-liquid-than-top-K slice (e.g. "not mega-cap, not
+    micro-cap") of a point-in-time candidate pool, mechanically and without
+    looking at any strategy's returns."""
+    ranked = rank_by_trailing_dollar_volume(candidates, price_panel, as_of, lookback_days)
+    return ranked.iloc[max(band_start_rank - 1, 0):band_end_rank].index.tolist()
 
 
 def liquid_universe_by_day(

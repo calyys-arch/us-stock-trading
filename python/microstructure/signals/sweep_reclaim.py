@@ -1,4 +1,18 @@
 """
+RETIRED (2026-08-13) — verdict NO-GO, no further work planned.
+cost_adjusted_profit_factor 0.548 (calibrated, full window) vs the 1.3 gate
+required by configs/goal.yaml; also fails wfo_go (0% pass ratio, 8 folds),
+monte_carlo_p5_sharpe (-31.488), and the mandatory 2x-slippage stress test
+(-$53.3M net). Root cause: fires ~104,000 times over 11 months/20 symbols
+(a very loose multi-level trigger catching ordinary noise, not real
+liquidity sweeps) with a stop too close to entry to survive that noise.
+Full evidence: backtests/reports/strategy_review_summary.md §3.1 and
+backtests/reports/slippage_calibration_report.md. Code and tests are kept
+and still correct; this signal is excluded from the default run of
+scripts/run_intraday_backtest.py (see its RETIRED_SIGNALS) but remains
+importable and explicitly runnable/testable — the logic below is
+unchanged by this retirement.
+
 S1 — Liquidity Sweep & Reclaim.
 
 Thesis (docs/microstructure_pivot_plan.md §1, S1): price pierces a known
@@ -14,6 +28,7 @@ from __future__ import annotations
 
 import pandas as pd
 
+from .. import context as ctx
 from ..context import LiquidityLevels
 from . import MicroSignal
 
@@ -38,16 +53,21 @@ def _round_support_levels(levels: LiquidityLevels, current_price: float) -> list
     return [r for r in levels.round_levels if r < current_price]
 
 
-def _nearest_opposite_level(levels: list[float], price: float, direction: str) -> float | None:
-    """Nearest level on the side a `direction` trade is heading toward
-    (used as a simple profit target — the opposite liquidity pool)."""
-    if not levels:
-        return None
-    if direction == "long":
-        candidates = [lvl for lvl in levels if lvl > price]
-        return min(candidates) if candidates else None
-    candidates = [lvl for lvl in levels if lvl < price]
-    return max(candidates) if candidates else None
+# Profit-TARGET level selection (as opposed to `_resistance_levels`/
+# `_support_levels` above, which feed SWEEP DETECTION and legitimately
+# include `eq_highs`/`eq_lows`) now lives in context.py as
+# `target_resistance_levels`/`target_support_levels`/`nearest_liquidity_target`
+# — pulled up there (2026-08-06) so vp_breakout.py's "next liquidity pool"
+# target can reuse the EXACT SAME fixed logic instead of a second copy that
+# could silently drift and reintroduce the eq_highs/eq_lows-as-target bug
+# investigated after the 2026-07-30 backtest report (see context.py's
+# docstring for the full incident writeup: ~90% of signals ending up with
+# a target closer than the stop, because eq_highs/eq_lows sit only a
+# fraction of an ATR away). Thin aliases kept here so this module's own
+# call sites below don't need to say `ctx.` everywhere.
+_target_resistance_levels = ctx.target_resistance_levels
+_target_support_levels = ctx.target_support_levels
+_nearest_opposite_level = ctx.nearest_liquidity_target
 
 
 def evaluate_sweep_reclaim(
@@ -91,7 +111,7 @@ def evaluate_sweep_reclaim(
             continue
         sweep_extreme = float(swept["high"].max())
         stop = sweep_extreme + stop_atr_mult * current_atr
-        target = _nearest_opposite_level(_support_levels(levels, now_close), now_close, "short")
+        target = _nearest_opposite_level(_target_support_levels(levels, now_close), now_close, "short")
         return MicroSignal(
             symbol=symbol, strategy="sweep_reclaim", direction="short",
             signal_time=now_time, entry_price=now_close, stop_price=stop,
@@ -107,7 +127,7 @@ def evaluate_sweep_reclaim(
             continue
         sweep_extreme = float(swept["low"].min())
         stop = sweep_extreme - stop_atr_mult * current_atr
-        target = _nearest_opposite_level(_resistance_levels(levels, now_close), now_close, "long")
+        target = _nearest_opposite_level(_target_resistance_levels(levels, now_close), now_close, "long")
         return MicroSignal(
             symbol=symbol, strategy="sweep_reclaim", direction="long",
             signal_time=now_time, entry_price=now_close, stop_price=stop,

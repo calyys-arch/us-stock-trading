@@ -43,9 +43,12 @@ def _fvg_bars(n: int = 40, start: str = "2024-06-04 09:30") -> pd.DataFrame:
 
 def test_fvg_retest_day_produces_a_filled_trade_with_target_hit():
     bars = _fvg_bars()
+    # bar1.high=50.5, bar3.low=55.2 -> gap_width=4.7, entry(0.5)=52.85,
+    # stop=gap_low-width=45.8 -> target is stop-mirrored (1R):
+    # 52.85 + (52.85-45.8) = 59.9 (see fvg_retest.py's target_price comment).
     # bar 23: retest bar touching the gap's limit price (~52.85) and, in the
-    # same bar, running up to the target (bar2's close, 55.5).
-    bars.loc[bars.index[23], ["open", "high", "low", "close"]] = [56.0, 56.2, 52.0, 53.0]
+    # same bar, running up to that target.
+    bars.loc[bars.index[23], ["open", "high", "low", "close"]] = [56.0, 60.0, 52.0, 59.5]
 
     params = {"vol_mult": 2.0, "entry_pct": 0.5, "expiry_bars": 10}
     trades, emitted, filled = eng.run_symbol_day(
@@ -146,6 +149,86 @@ def test_time_stop_exit_when_unfavorable():
     assert trades[0].exit_reason == "time_stop"
 
 
+def _orb_multi_break_bars() -> pd.DataFrame:
+    """A session whose price crosses back and forth over the opening-range
+    high four separate times — the "orb_vwap re-fires all session" pattern
+    the rescue investigation measured at ~4.8 entries/symbol/session
+    (backtests/reports/orb_vwap_rescue_report.md)."""
+    bars = _flat_bars(80, price=100.0)
+    bars.loc[bars.index[5], "high"] = 101.0   # OR high (first 15 bars)
+    bars.loc[bars.index[6], "low"] = 99.0     # OR low
+    for i in (21, 35, 49, 63):
+        bars.loc[bars.index[i - 1], "close"] = 100.0   # back inside the range
+        bars.loc[bars.index[i], "close"] = 102.0       # fresh break above the OR high
+        bars.loc[bars.index[i], "high"] = 102.0
+    return bars
+
+
+def test_orb_vwap_refires_every_session_break_when_uncapped():
+    bars = _orb_multi_break_bars()
+    params = {"or_minutes": 15, "vwap_side_filter": False}
+    cfg = _cfg(time_stop_minutes=1)  # exit fast so the state machine is free for the next break
+    _trades, emitted, _filled = eng.run_symbol_day("AAA", bars, None, "orb_vwap", params, cfg)
+    assert emitted >= 3
+
+
+@pytest.mark.parametrize("cap", [1, 2])
+def test_max_entries_per_session_caps_signals_and_defaults_to_unlimited(cap):
+    bars = _orb_multi_break_bars()
+    cfg = _cfg(time_stop_minutes=1)
+    uncapped = {"or_minutes": 15, "vwap_side_filter": False}
+    capped = {**uncapped, "max_entries_per_session": cap}
+
+    _t0, emitted_uncapped, _f0 = eng.run_symbol_day("AAA", bars, None, "orb_vwap", uncapped, cfg)
+    trades, emitted_capped, filled = eng.run_symbol_day("AAA", bars, None, "orb_vwap", capped, cfg)
+
+    assert emitted_uncapped > cap
+    assert emitted_capped == cap
+    assert filled <= cap and len(trades) <= cap
+    # None (and an absent key) must both mean "unlimited", i.e. unchanged behavior.
+    _t1, emitted_explicit_none, _f1 = eng.run_symbol_day(
+        "AAA", bars, None, "orb_vwap", {**uncapped, "max_entries_per_session": None}, cfg,
+    )
+    assert emitted_explicit_none == emitted_uncapped
+
+
+def test_orb_vwap_r_multiple_target_produces_a_target_exit():
+    bars = _flat_bars(40, price=100.0)
+    bars.loc[bars.index[5], "high"] = 101.0
+    bars.loc[bars.index[6], "low"] = 99.0
+    bars.loc[bars.index[20], "close"] = 100.0
+    bars.loc[bars.index[21], ["high", "low", "close"]] = [102.0, 101.5, 102.0]  # long break, stop = OR low 99.0
+    # Entry ~102 at bar 22's open, risk = 3.0, so a 1R target sits at 105.0.
+    bars.loc[bars.index[22], ["open", "high", "low", "close"]] = [102.0, 106.0, 101.8, 105.5]
+
+    params = {"or_minutes": 15, "vwap_side_filter": False, "target_r_multiple": 1.0}
+    trades, _emitted, filled = eng.run_symbol_day(
+        "AAA", bars, None, "orb_vwap", params, _cfg(time_stop_minutes=10_000),
+    )
+    assert filled == 1
+    assert trades[0].exit_reason == "target"
+    assert trades[0].net_pnl > 0
+
+
+def test_orb_vwap_stop_atr_buffer_widens_the_stop_end_to_end():
+    """The buffered stop must sit further from entry than the raw OR-extreme
+    stop, which (via 1%-risk sizing) means strictly fewer shares."""
+    bars = _flat_bars(40, price=100.0)
+    bars.loc[bars.index[5], "high"] = 101.0
+    bars.loc[bars.index[6], "low"] = 99.0
+    bars.loc[bars.index[20], "close"] = 100.0
+    bars.loc[bars.index[21], ["high", "low", "close"]] = [102.0, 101.5, 102.0]
+
+    base = {"or_minutes": 15, "vwap_side_filter": False}
+    cfg = _cfg(time_stop_minutes=10_000, max_notional_pct=10.0)
+    trades_raw, _, _ = eng.run_symbol_day("AAA", bars, None, "orb_vwap", base, cfg)
+    trades_buf, _, _ = eng.run_symbol_day(
+        "AAA", bars, None, "orb_vwap", {**base, "stop_atr_buffer_mult": 1.0}, cfg,
+    )
+    assert trades_raw and trades_buf
+    assert trades_buf[0].shares < trades_raw[0].shares
+
+
 def test_slippage_increases_cost_and_stress_multiplier_doubles_it():
     bars = _fvg_bars()
     bars.loc[bars.index[23], ["open", "high", "low", "close"]] = [56.0, 56.2, 52.0, 53.0]
@@ -159,6 +242,64 @@ def test_slippage_increases_cost_and_stress_multiplier_doubles_it():
 
     assert len(trades_normal) == 1 and len(trades_stress) == 1
     assert trades_stress[0].net_pnl < trades_normal[0].net_pnl
+
+
+def test_slippage_price_falls_back_to_flat_half_spread_when_symbol_override_absent():
+    """half_spread_bps_by_symbol=None (the default) or a dict that simply
+    doesn't mention this symbol must produce IDENTICAL slippage to never
+    having set the field at all — the backward-compatibility contract for
+    every pre-existing caller."""
+    cfg_no_override = _cfg(half_spread_bps=5.0, impact_bps_per_participation=0.0)
+    cfg_empty_dict = _cfg(half_spread_bps=5.0, impact_bps_per_participation=0.0,
+                           half_spread_bps_by_symbol={})
+    cfg_other_symbol = _cfg(half_spread_bps=5.0, impact_bps_per_participation=0.0,
+                             half_spread_bps_by_symbol={"MSFT": 0.5})
+
+    for cfg in (cfg_no_override, cfg_empty_dict, cfg_other_symbol):
+        price = eng._slippage_price(100.0, "long", 100, 10_000.0, cfg, is_entry=True, symbol="AAPL")
+        assert price == pytest.approx(100.0 * (1 + 5.0 / 10_000.0))
+        # No symbol passed at all (e.g. a caller that predates this field) —
+        # must behave exactly like the flat constant too.
+        price_no_symbol = eng._slippage_price(100.0, "long", 100, 10_000.0, cfg, is_entry=True)
+        assert price_no_symbol == pytest.approx(price)
+
+
+def test_slippage_price_uses_calibrated_per_symbol_override_when_present():
+    cfg = _cfg(half_spread_bps=5.0, impact_bps_per_participation=0.0,
+               half_spread_bps_by_symbol={"AAPL": 0.3, "STX": 6.5})
+
+    aapl_entry = eng._slippage_price(100.0, "long", 100, 10_000.0, cfg, is_entry=True, symbol="AAPL")
+    assert aapl_entry == pytest.approx(100.0 * (1 + 0.3 / 10_000.0))
+
+    stx_entry = eng._slippage_price(100.0, "long", 100, 10_000.0, cfg, is_entry=True, symbol="STX")
+    assert stx_entry == pytest.approx(100.0 * (1 + 6.5 / 10_000.0))
+
+    # A symbol not in the override dict still falls back to the flat constant.
+    other_entry = eng._slippage_price(100.0, "long", 100, 10_000.0, cfg, is_entry=True, symbol="MSFT")
+    assert other_entry == pytest.approx(100.0 * (1 + 5.0 / 10_000.0))
+
+
+def test_run_symbol_day_threads_calibrated_symbol_override_into_fills():
+    """End-to-end: run_symbol_day's real fill/exit path (not just the
+    _slippage_price unit) must pick up a per-symbol override via the
+    symbol actually passed to run_symbol_day."""
+    bars = _fvg_bars()
+    bars.loc[bars.index[23], ["open", "high", "low", "close"]] = [56.0, 60.0, 52.0, 59.5]
+    params = {"vol_mult": 2.0, "entry_pct": 0.5, "expiry_bars": 10}
+
+    cfg_flat = _cfg(half_spread_bps=5.0, impact_bps_per_participation=0.0)
+    cfg_override = _cfg(half_spread_bps=5.0, impact_bps_per_participation=0.0,
+                         half_spread_bps_by_symbol={"AAPL": 0.5})
+
+    trades_flat, _, _ = eng.run_symbol_day("AAPL", bars, None, "fvg_retest", params, cfg_flat)
+    trades_override, _, _ = eng.run_symbol_day("AAPL", bars, None, "fvg_retest", params, cfg_override)
+
+    assert len(trades_flat) == 1 and len(trades_override) == 1
+    # Tighter calibrated spread (0.5bps < 5.0bps) means less slippage paid
+    # on both legs (commission is zeroed out in _cfg) -> strictly higher
+    # net P&L for the identical underlying price path.
+    assert trades_override[0].net_pnl > trades_flat[0].net_pnl
+    assert trades_override[0].entry_price != trades_flat[0].entry_price
 
 
 def test_position_size_scales_with_risk_and_stop_distance():

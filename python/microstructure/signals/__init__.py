@@ -25,7 +25,7 @@ import pandas as pd
 @dataclass
 class MicroSignal:
     symbol: str
-    strategy: str              # "sweep_reclaim" | "fvg_retest" | "orb_vwap" | "l2_absorption"
+    strategy: str              # "sweep_reclaim" | "fvg_retest" | "orb_vwap" | "l2_absorption" | "absorption_breakout"
     direction: str             # "long" | "short"
     signal_time: pd.Timestamp  # the already-closed bar the decision was made on
     entry_price: float         # limit/reference price; intraday_engine decides actual fill on NEXT bar

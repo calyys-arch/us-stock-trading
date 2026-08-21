@@ -40,3 +40,9 @@ max_open_micro_positions: 5
 max_daily_loss_pct: 0.02             # daily-loss kill-switch: halt new micro entries for the day
 event_blackout_minutes: 30           # +/- window around earnings/8-K/econ events (see python/core/event_blackout.py)
 micro_cancel_after_seconds: 60       # auto-cancel an unfilled entry limit after this long
+
+# Paper-forward-test hard dollar cap (2026-08-15). Applied as an ADDITIONAL
+# ceiling on top of the pct caps above — does not loosen any existing gate.
+# A few thousand USD per trade, well under max_intraday_notional_pct of the
+# SimBroker $1M default equity. See backtests/reports/absorption_breakout_paper_protocol.md.
+paper_max_notional_usd: 3000.0

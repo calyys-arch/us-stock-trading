@@ -1,0 +1,79 @@
+# All 15 entry hypotheses, scored as 7 independent gates (no AND).
+# Intraday names that already have a decision-chart knob are compared
+# on 1m / 5m / 15m. 1m-native session signals stay on 1m. Daily
+# hypotheses have no intraday chart — they get one daily column.
+#
+# Official research GO (hard AND) is unchanged. auto_execute is unchanged.
+
+combination_mode: single_gates
+
+gate_names:
+  - wfo_go
+  - oos_drawdown_within_limit
+  - has_oos_trades
+  - min_trades_per_oos_fold
+  - cost_adjusted_profit_factor
+  - monte_carlo_p5_sharpe
+  - stress_slippage_1.5x_pf_ge_1
+
+routes:
+  pairs_trading:
+    signal: pairs_trading
+    kind: daily
+    charts: [0]
+  xsection_mean_reversion:
+    signal: xsection_mean_reversion
+    kind: daily
+    charts: [0]
+  daily_range_breakout:
+    signal: daily_range_breakout
+    kind: daily
+    charts: [0]
+  absorption_breakout:
+    signal: absorption_breakout
+    kind: intraday
+    charts: [1, 5, 15]
+  auction_reclaim:
+    signal: auction_reclaim
+    kind: intraday
+    charts: [1, 5, 15]
+  vsa_effort:
+    signal: vsa_effort
+    kind: intraday
+    charts: [1, 5, 15]
+  vsa_no_demand:
+    signal: vsa_no_demand
+    kind: intraday
+    charts: [1, 5, 15]
+  obv_divergence:
+    signal: obv_divergence
+    kind: intraday
+    charts: [1, 5, 15]
+  l2_absorption:
+    signal: l2_absorption
+    kind: intraday_native_1m
+    charts: [1]
+  sweep_reclaim:
+    signal: sweep_reclaim
+    kind: intraday_native_1m
+    charts: [1]
+  fvg_retest:
+    signal: fvg_retest
+    kind: intraday_native_1m
+    charts: [1]
+  orb_vwap:
+    signal: orb_vwap
+    kind: intraday_native_1m
+    charts: [1]
+  orb_vwap_regime:
+    signal: orb_vwap_regime
+    kind: intraday_native_1m
+    charts: [1]
+  vwap_band_fade:
+    signal: vwap_band_fade
+    kind: intraday_native_1m
+    charts: [1]
+  vp_breakout:
+    signal: vp_breakout
+    kind: intraday_native_1m
+    charts: [1]

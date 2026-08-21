@@ -81,6 +81,10 @@ class RiskConfig:
     max_daily_loss_pct: float = 0.02               # kill-switch: halt new micro entries for the day
     event_blackout_minutes: int = 30               # +/- window around earnings/8-K/econ events
     micro_cancel_after_seconds: int = 60           # auto-cancel an unfilled entry limit after this long
+    # Paper-forward-test hard dollar cap (2026-08-15). 0 = disabled (tests
+    # that construct a bare RiskConfig stay uncapped). When > 0, an
+    # ADDITIONAL ceiling on top of the pct caps — never a loosening.
+    paper_max_notional_usd: float = 0.0
 
 
 RISK_CONFIG_PATH = "configs/risk.yaml"
@@ -231,6 +235,8 @@ class RiskEngine:
             notional_target = min(notional_target, adv_cap_a)
         if adv_cap_b > 0:
             notional_target = min(notional_target, adv_cap_b / max(signal.hedge_ratio, 1e-6))
+        if self.cfg.paper_max_notional_usd > 0:
+            notional_target = min(notional_target, self.cfg.paper_max_notional_usd)
 
         qty_a = int(notional_target / snapshot_a.price) if snapshot_a.price > 0 else 0
         qty_b = int((notional_target * abs(signal.hedge_ratio)) / snapshot_b.price) if snapshot_b.price > 0 else 0
@@ -378,6 +384,8 @@ class RiskEngine:
             shares_by_risk = risk_dollars / stop_dist
             shares_by_notional = (account_equity * self.cfg.max_intraday_notional_pct) / entry_price
             qty = max(int(min(shares_by_risk, shares_by_notional)), 0)
+            if self.cfg.paper_max_notional_usd > 0:
+                qty = min(qty, int(self.cfg.paper_max_notional_usd / entry_price))
 
         if rejection is None and qty <= 0:
             rejection = "size_rounded_to_zero"

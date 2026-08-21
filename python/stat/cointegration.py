@@ -76,8 +76,23 @@ def test_pair(
         residuals, autolag="AIC"
     )
 
-    spread_mean = float(np.mean(residuals))
-    spread_std = float(np.std(residuals, ddof=1)) if n > 1 else 0.0
+    # `spread_mean`/`spread_std` MUST describe the same quantity that
+    # `current_spread()` below computes at trade time — `log(a) - beta*log(b)`,
+    # WITHOUT the OLS intercept, because live/backtest code only ever has the
+    # hedge ratio to work with. Summarizing the OLS RESIDUAL here instead
+    # (an earlier version of this function did exactly that) silently defines
+    # `spread_mean` as the residual mean, which is 0.0 by construction for any
+    # OLS fit with an intercept — while `current_spread` keeps returning
+    # `alpha + residual`. The z-score is then off by `alpha / sigma`, a huge
+    # constant (for real ETF pairs, order 1e2), so `|z| >= entry_z` is
+    # permanently satisfied on one side and `|z| <= exit_z` is unreachable:
+    # the strategy enters immediately, never exits on reversion, and every
+    # position exits on the stale-timeout instead. Deriving both moments from
+    # the spread series that is actually traded makes that class of mismatch
+    # impossible; `tests/test_pairs_scan.py::test_z_score_is_centred_*` pins it.
+    spread_series = log_a - beta * log_b
+    spread_mean = float(np.mean(spread_series))
+    spread_std = float(np.std(spread_series, ddof=1)) if n > 1 else 0.0
 
     half_life = ornstein_uhlenbeck_half_life(residuals)
 
@@ -100,9 +115,14 @@ def test_pair(
 
 def current_spread(price_a: float, price_b: float, hedge_ratio: float) -> float:
     """Spread value (in log-price space) for live/backtest z-score computation.
-    Must use the SAME transform (log price, OLS residual convention) as
-    test_pair() above, or the z-score will be computed against the wrong
-    scale."""
+
+    This is THE definition of "the spread" for the whole pairs pipeline:
+    `log(a) - beta*log(b)`, no intercept. `test_pair()` above deliberately
+    computes `spread_mean`/`spread_std` from this same expression rather than
+    from the OLS residual, so that `spread_z_score(current_spread(...),
+    result.spread_mean, result.spread_std)` is a genuine standardized
+    deviation. Changing either side without the other reintroduces the
+    intercept mismatch documented in `test_pair`."""
     return float(np.log(price_a) - hedge_ratio * np.log(price_b))
 
 

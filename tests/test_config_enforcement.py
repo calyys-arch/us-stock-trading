@@ -170,17 +170,40 @@ def test_configs_yaml_files_are_valid_and_have_required_keys():
                 "reg_t_intraday_leverage", "reg_t_overnight_leverage",
                 "limit_price_buffer_bps", "flatten_limit_buffer_bps", "stop_limit_buffer_bps",
                 "micro_risk_per_trade_pct", "max_intraday_notional_pct", "max_open_micro_positions",
-                "max_daily_loss_pct", "event_blackout_minutes", "micro_cancel_after_seconds"):
+                "max_daily_loss_pct", "event_blackout_minutes", "micro_cancel_after_seconds",
+                "paper_max_notional_usd"):
         assert key in risk_cfg, f"configs/risk.yaml missing enforced key: {key}"
 
     for strat in ("pairs_trading", "xsection_mean_reversion"):
         assert "auto_execute" in strat_cfg[strat], f"{strat} missing auto_execute key"
         assert "enabled" in strat_cfg[strat], f"{strat} missing enabled key"
 
+    # 2026-08-15 paper-forward experiment: auto_execute: true is allowed
+    # ONLY for absorption_breakout (frozen NO-GO-but-closest forward test)
+    # and pairs_trading (regime-gated, 2022 GO evidence). This is NOT a
+    # WFO GO promotion. Every retired / confirmed-losing microstructure
+    # name must stay false.
+    from python.core.paper_forward import PAPER_AUTO_ALLOWLIST, RETIRED_MICRO_SIGNALS
+
+    assert strat_cfg["absorption_breakout"]["auto_execute"] is True
+    assert strat_cfg["pairs_trading"]["auto_execute"] is True
+    for name, block in strat_cfg.items():
+        if not isinstance(block, dict) or "auto_execute" not in block:
+            continue
+        if name in PAPER_AUTO_ALLOWLIST:
+            continue
+        assert block["auto_execute"] is False, (
+            f"{name} has auto_execute=true — only {sorted(PAPER_AUTO_ALLOWLIST)} may "
+            "(paper-forward-test / regime-gated, not a WFO GO promotion)"
+        )
+        if name in RETIRED_MICRO_SIGNALS:
+            assert block["auto_execute"] is False
+
     assert "data_source" in broker_cfg, "configs/broker.yaml missing data_source key"
-    assert broker_cfg["data_source"] == "simulated", (
-        "configs/broker.yaml must default to data_source: simulated — the checked-in default "
-        "must never silently require a real IB Gateway/TWS connection"
+    assert broker_cfg["data_source"] == "futu_live", (
+        "configs/broker.yaml must default to data_source: futu_live for the "
+        "2026-08-15 paper-forward experiment — a simulated feed would make "
+        "the experiment fake. Broker stays SimBroker (paper execution)."
     )
     for key in ("host", "feed_port", "broker_port", "feed_client_id", "broker_client_id"):
         assert key in broker_cfg["ibkr"], f"configs/broker.yaml ibkr section missing key: {key}"
@@ -195,11 +218,11 @@ def test_broker_yaml_data_source_is_actually_read_by_engine_runtime():
     from dashboard.state import DashboardState
 
     default_runtime = EngineRuntime(DashboardState())
-    assert default_runtime.data_source == "simulated"
+    assert default_runtime.data_source == "futu_live"
     assert isinstance(default_runtime.broker, SimBroker), (
-        "data_source=simulated must wire up SimBroker, not a real IbkrBroker"
+        "data_source=futu_live is feed-only — broker must stay SimBroker (paper)"
     )
-    assert default_runtime.state.data_source == "simulated"
+    assert default_runtime.state.data_source == "futu_live"
 
     patched_cfg = dict(default_runtime.broker_cfg)
     patched_cfg["data_source"] = "ibkr_paper"
@@ -214,6 +237,39 @@ def test_broker_yaml_data_source_is_actually_read_by_engine_runtime():
 
     assert ibkr_runtime.data_source == "ibkr_paper"
     assert ibkr_runtime.state.data_source == "ibkr_paper"
+
+
+def test_broker_yaml_futu_live_data_source_is_actually_read_by_engine_runtime():
+    """Same regression guard as the ibkr_paper case above, for the newer
+    `futu_live` option (python/interfaces/futu_live_feed.py): switching
+    configs/broker.yaml to data_source: futu_live must actually route
+    EngineRuntime.start() to FutuLiveFeed, WITHOUT touching broker
+    selection — the broker must stay SimBroker (feed-only swap, see
+    dashboard/engine_bridge.py's module docstring)."""
+    from dashboard.engine_bridge import EngineRuntime
+    from dashboard.state import DashboardState
+    from python.interfaces.futu_live_feed import FutuLiveFeed
+
+    default_runtime = EngineRuntime(DashboardState())
+    assert default_runtime.data_source == "futu_live"
+    patched_cfg = dict(default_runtime.broker_cfg)
+    patched_cfg["data_source"] = "futu_live"
+    import dashboard.engine_bridge as engine_bridge_module
+
+    original_loader = engine_bridge_module._load_broker_config
+    engine_bridge_module._load_broker_config = lambda: patched_cfg
+    try:
+        futu_runtime = EngineRuntime(DashboardState())
+    finally:
+        engine_bridge_module._load_broker_config = original_loader
+
+    assert futu_runtime.data_source == "futu_live"
+    assert futu_runtime.state.data_source == "futu_live"
+    # Broker selection is untouched by this data source — still the safe,
+    # zero-connection default, same as data_source: simulated (only
+    # ibkr_paper deliberately swaps the broker too).
+    assert isinstance(futu_runtime.broker, SimBroker)
+    assert isinstance(futu_runtime._make_futu_live_feed(), FutuLiveFeed)
 
 
 def test_broker_yaml_invalid_data_source_falls_back_to_simulated():
@@ -239,37 +295,37 @@ def test_broker_yaml_invalid_data_source_falls_back_to_simulated():
 def test_universe_yaml_symbols_are_actually_wired_into_dashboard_runtime():
     """Forex lesson #2-style regression guard for the Part A fix: dashboard/
     app.py's module-level `runtime = EngineRuntime(state, symbols=...)` call
-    must actually pass configs/universe.yaml's 20-symbol fixed_universe list
-    — not just have that config file present on disk with nothing reading
-    it into the LIVE dashboard runtime (EngineRuntime.__init__'s own
-    hardcoded 5-symbol placeholder — ["AAPL", "MSFT", "GOOGL", "AMZN",
-    "META"] — is the exact silent-fallback failure mode being guarded
-    against here)."""
+    must actually pass the paper-forward TIGHT6 list
+    (python.core.paper_forward.ABSORPTION_BREAKOUT_UNIVERSE) — not the
+    20-symbol research universe and not EngineRuntime's old 5-symbol
+    placeholder."""
     from python.data.fixed_universe import load_universe_config
 
     import dashboard.app as dashboard_app_module
 
-    expected_symbols = sorted(load_universe_config()["symbols"])
-    assert len(expected_symbols) == 20
+    from python.core.paper_forward import ABSORPTION_BREAKOUT_UNIVERSE
+
+    expected_symbols = sorted(ABSORPTION_BREAKOUT_UNIVERSE)
+    assert len(expected_symbols) == 6
 
     assert sorted(dashboard_app_module.runtime.symbols) == expected_symbols
     assert dashboard_app_module.runtime.state.symbols == dashboard_app_module.runtime.symbols
-    # The bug this guards against: EngineRuntime.__init__'s hardcoded
-    # placeholder fallback used whenever no `symbols` kwarg is passed.
-    placeholder = ["AAPL", "MSFT", "GOOGL", "AMZN", "META"]
-    assert sorted(dashboard_app_module.runtime.symbols) != sorted(placeholder)
+    # Research universe stays 20 names; the LIVE paper tick feed is TIGHT6.
+    research = sorted(load_universe_config()["symbols"])
+    assert len(research) == 20
+    assert sorted(dashboard_app_module.runtime.symbols) != research
 
 
 def test_engine_runtime_still_defaults_to_placeholder_when_constructed_bare():
-    """EngineRuntime's own default (no `symbols` kwarg) must stay the
-    harmless 5-symbol placeholder — Part A only changes the dashboard/app.py
-    CALL SITE, not EngineRuntime's own fallback behavior, so other
-    callers/tests that construct EngineRuntime without args are unaffected."""
+    """EngineRuntime's own default (no `symbols` kwarg) is the paper-forward
+    TIGHT6 list — the live tick feed for absorption_breakout."""
     from dashboard.engine_bridge import EngineRuntime
     from dashboard.state import DashboardState
 
+    from python.core.paper_forward import ABSORPTION_BREAKOUT_UNIVERSE
+
     bare_runtime = EngineRuntime(DashboardState())
-    assert bare_runtime.symbols == ["AAPL", "MSFT", "GOOGL", "AMZN", "META"]
+    assert bare_runtime.symbols == list(ABSORPTION_BREAKOUT_UNIVERSE)
 
 
 def _validate(cfg: dict) -> dict:

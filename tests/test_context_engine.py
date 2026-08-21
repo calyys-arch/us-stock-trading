@@ -137,6 +137,39 @@ def test_opening_range_empty_bars():
     assert orange.high is None
 
 
+def test_closed_session_bars_aligns_to_0930_not_first_print():
+    """A mid-session start still bins to 09:30/09:35/…; the 10:15 bin
+    completes only when 10:19 closes."""
+    mid = _bars(2, start="2024-06-04 10:17")  # 10:17–10:18, 10:15 bin still open
+    assert context.session_bin_just_closed(mid, 5) is False
+    assert context.closed_session_bars(mid, 5).empty
+
+    complete = _bars(3, start="2024-06-04 10:17")
+    # 10:17, 10:18, 10:19 — clock-complete 10:15 bin
+    out = context.closed_session_bars(complete, 5)
+    assert len(out) == 1
+    assert out.index[0] == pd.Timestamp("2024-06-04 10:15")
+    assert context.session_bin_just_closed(complete, 5) is True
+
+
+def test_closed_session_bars_drops_incomplete_first_bin_and_keeps_0930():
+    first_four = _bars(4, start="2024-06-04 09:30")  # 09:30–09:33
+    assert context.session_bin_just_closed(first_four, 5) is False
+    assert context.closed_session_bars(first_four, 5).empty
+
+    first_five = _bars(5, start="2024-06-04 09:30")  # through 09:34
+    out = context.closed_session_bars(first_five, 5)
+    assert len(out) == 1
+    assert out.index[0] == pd.Timestamp("2024-06-04 09:30")
+    assert float(out["volume"].iloc[0]) == pytest.approx(5000.0)
+
+
+def test_closed_session_bars_chart_minutes_1_is_passthrough():
+    bars = _bars(7, start="2024-06-04 09:30")
+    out = context.closed_session_bars(bars, 1)
+    assert out is bars
+
+
 def test_compute_context_orchestrator_returns_all_components():
     today = _bars(30, start="2024-06-04 09:30", start_price=100.0, trend=0.1)
     prior = _bars(20, start="2024-06-03 09:30", start_price=98.0, trend=0.1)

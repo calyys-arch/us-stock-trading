@@ -1,0 +1,49 @@
+# Frozen, regime-matched scorecards for live gate_policy.py.
+# These are NOT re-tuned. Numbers are copied from the named reports.
+# Research GO ANDs the survival set on a single window
+# (configs/goal.yaml live_promotion.require_all_gates_pass +
+# scripts/run_intraday_backtest.py), not the old seven-way AND.
+
+absorption_breakout:
+  # Holdout 2026-06-01..2026-08-01, TIGHT6 + breakout_atr_mult=0.5
+  # (absorption_breakout_investigation_report.md §4). Same calendar
+  # window as the current trend_persistent tape.
+  trend_persistent:
+    window: "2026-06-01..2026-08-01"
+    source: backtests/reports/absorption_breakout_investigation_report.md
+    cost_adjusted_profit_factor: 1.525
+    max_oos_drawdown: 0.08
+    stress_slippage_2x_net_positive: true
+    has_oos_trades: true
+    mean_oos_sharpe: -0.233
+    monte_carlo_p5_sharpe: -0.727
+    wfo_pass_ratio: null          # holdout shorter than one WFO fold
+    reality_check_p_value: null
+
+pairs_trading:
+  # 2022 low-frequency / high entry_z configuration that flipped to GO
+  # in the regime-generalization study (master_synthesis_2026-08.md).
+  mean_reversion_friendly:
+    window: "2022"
+    source: backtests/reports/master_synthesis_2026-08.md
+    cost_adjusted_profit_factor: 1.40
+    max_oos_drawdown: 0.18
+    stress_slippage_2x_net_positive: true
+    has_oos_trades: true
+    wfo_pass_ratio: 0.70
+    mean_oos_sharpe: 0.80
+    monte_carlo_p5_sharpe: 0.05
+    reality_check_p_value: 0.04
+  trend_persistent:
+    # 2024-2026 pairs verdict: NO-GO. Present so a mis-routed TREND
+    # evaluation would still fail even if family blocking were removed.
+    window: "2024-2026"
+    source: backtests/reports/pairs_scan_report.md
+    cost_adjusted_profit_factor: 0.85
+    max_oos_drawdown: 0.20
+    stress_slippage_2x_net_positive: false
+    has_oos_trades: true
+    wfo_pass_ratio: 0.556
+    mean_oos_sharpe: -0.50
+    monte_carlo_p5_sharpe: -1.575
+    reality_check_p_value: 0.40

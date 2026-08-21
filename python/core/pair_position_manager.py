@@ -17,6 +17,39 @@ Exit logic (Chan Ch.7, p.132-133):
     reverted within `max_holding_days` (a multiple of the pair's estimated
     half-life; Chan suggests this catches "the cointegration relationship
     has broken down" cases that a symmetric z-score exit alone would miss).
+
+OPT-IN EXIT ABLATIONS (2026-08-13) — all DEFAULT OFF
+----------------------------------------------------
+`backtests/reports/pairs_scan_report.md` measured the exit mix on the
+scanned universe and found **91-96% of positions exit on the stale timeout,
+not on z-reversion**: the O-U half-life describes its own estimation window
+well and predicts actual reversion time badly, so the timeout fires at an
+arbitrary point rather than at a considered one. Three exit rules were added
+to test whether that is fixable. Every one of them is off by default, and
+with the defaults `check_exits` is byte-for-byte the rule it always was
+(pinned by tests/test_pairs_exit_rules.py::
+test_defaults_reproduce_the_legacy_exit_rule_exactly).
+
+  1. `reestimate_half_life()` — re-derive `max_holding_days` from a FRESH
+     half-life estimate while the position is open, instead of freezing it
+     at open time from an estimate that may already have been up to
+     `revalidate_every_days` old. Changes how `half_life_multiplier_max_hold`
+     is APPLIED, not what it is: no new parameter.
+  2. `broken_pairs` — exit immediately when the pair stops passing the
+     existing `is_tradeable` screen, rather than waiting out a timeout on a
+     relationship the scan no longer believes in. A boolean design option,
+     not a tunable threshold. Reason: "coint_breakdown".
+  3. `stop_z` — exit when the spread blows THROUGH the entry point rather
+     than reverting. **This directly contradicts the Chan-derived design
+     stated above and is the one change here that is a policy decision, not
+     a mechanical one. It requires explicit human sign-off before being
+     enabled anywhere, independently of what the numbers say.** Reason:
+     "stop_loss".
+
+The measured result of all three is in `pairs_scan_report.md` §2026-08-13.
+Summary: none of them rescues the strategy, which is why they all remain
+off. They are kept, wired and tested rather than deleted so that the
+negative result is reproducible.
 """
 from __future__ import annotations
 
@@ -112,6 +145,37 @@ class PairPositionManager:
         )
         return pos
 
+    def reestimate_half_life(self, code_a: str, code_b: str, half_life_days: float) -> bool:
+        """Re-derive an OPEN position's stale-timeout budget from a fresh
+        half-life estimate. Returns False if the pair is not open.
+
+        Opt-in ablation 1 (see module docstring). `max_holding_days` is
+        normally frozen at open time from the half-life the pair-selection
+        scan produced, which by then can be up to `revalidate_every_days`
+        stale and is never revised however long the position is held. This
+        recomputes the SAME quantity — `half_life_multiplier * half_life` —
+        from the current estimate, so the remaining allowance
+        (`max_holding_days - holding_days`) tracks the latest read on how
+        fast this spread actually reverts.
+
+        Staleness is still measured from `entry_time`, so a downward
+        revision can leave the remaining allowance at or below zero and the
+        position exits on the next `check_exits`. That is the intended
+        behavior, not an edge case: "this spread reverts faster than I
+        thought, so I have already held it long enough" is exactly the
+        information the fixed timeout throws away.
+
+        The caller is responsible for only ever passing an estimate that was
+        computable at the current bar — this method has no notion of time and
+        cannot enforce that.
+        """
+        pos = self._open.get(self._key(code_a, code_b))
+        if pos is None:
+            return False
+        pos.half_life_days = float(half_life_days)
+        pos.max_holding_days = max(float(half_life_days), 1.0) * self._half_life_multiplier
+        return True
+
     def close_position(self, code_a: str, code_b: str) -> OpenPairPosition | None:
         key = self._key(code_a, code_b)
         pos = self._open.pop(key, None)
@@ -124,15 +188,43 @@ class PairPositionManager:
         current_z_by_pair: dict,   # {(code_a, code_b): current_z_score}
         now: datetime,
         exit_z_threshold: float,
+        stop_z: float | None = None,
+        broken_pairs: set | None = None,
+        stale_timeout_enabled: bool = True,
     ) -> list[tuple[OpenPairPosition, str]]:
         """Returns [(position, reason)] for every pair that should be closed
-        NOW — either z-score reversion or holding-period staleness. Reason is
-        one of "z_reversion" | "stale_timeout". Never returns "stop_loss" —
-        this strategy family does not use price-based stops (see module
-        docstring)."""
+        NOW. Reason is one of "z_reversion" | "stop_loss" | "coint_breakdown"
+        | "stale_timeout".
+
+        With the default arguments this is exactly the original rule —
+        z-reversion or holding-period staleness, and never "stop_loss",
+        because this strategy family's documented design has no price-based
+        stop. The three optional arguments are the opt-in ablations described
+        in the module docstring; `stop_z` in particular is a POLICY change,
+        not a mechanical one, and must not be enabled without human sign-off.
+
+        Precedence, when more than one rule fires on the same bar:
+          z_reversion > stop_loss > coint_breakdown > stale_timeout
+        Reversion outranks everything because it is the profitable exit the
+        whole thesis is about — a pair that reverted AND simultaneously fell
+        out of the tradeable set should book the reversion, not be relabelled
+        a breakdown. The remaining three all close at the same price on the
+        same bar, so their order changes only the attribution, never the P&L.
+
+        `stop_z` is an ABSOLUTE |z| level (the engine derives it as
+        `entry_z * stop_z_multiple`), so this class stays ignorant of
+        `entry_z`. It fires only when the spread is beyond that level AND
+        strictly beyond its own entry z — without the second condition a
+        position entered at z = -4.0 under a stop at 3.0 would be stopped out
+        on its first bar, which measures the entry distribution rather than
+        the "kept widening after I entered" behavior the stop is meant to
+        catch.
+        """
+        broken = broken_pairs or ()
         to_close: list[tuple[OpenPairPosition, str]] = []
         for pos in list(self._open.values()):
-            z = current_z_by_pair.get((pos.code_a, pos.code_b))
+            key = (pos.code_a, pos.code_b)
+            z = current_z_by_pair.get(key)
             if z is not None:
                 reverted = (
                     (pos.side == SpreadSide.LONG_SPREAD and z >= -exit_z_threshold)
@@ -141,7 +233,18 @@ class PairPositionManager:
                 if reverted:
                     to_close.append((pos, "z_reversion"))
                     continue
-            if pos.is_stale(now):
+                if stop_z is not None and abs(z) > abs(pos.entry_z):
+                    widened = (
+                        (pos.side == SpreadSide.LONG_SPREAD and z <= -abs(stop_z))
+                        or (pos.side == SpreadSide.SHORT_SPREAD and z >= abs(stop_z))
+                    )
+                    if widened:
+                        to_close.append((pos, "stop_loss"))
+                        continue
+            if key in broken:
+                to_close.append((pos, "coint_breakdown"))
+                continue
+            if stale_timeout_enabled and pos.is_stale(now):
                 to_close.append((pos, "stale_timeout"))
         return to_close
 

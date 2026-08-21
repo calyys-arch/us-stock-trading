@@ -116,8 +116,13 @@ def run_pairs_backtest(
 ) -> PairsBacktestReport:
     """Backtest ONE candidate pair over its full aligned daily price history.
 
-    For a full-universe scan-then-trade backtest, call this once per pair
-    surfaced by python/stat/pair_scanner.scan() and aggregate the reports.
+    For the full-universe scan-then-trade variant — point-in-time pair
+    selection across `configs/pairs_universe.yaml`, a multi-pair portfolio
+    with a concurrency cap, and bid-ask/impact costs this function does not
+    charge — use `python/backtest/pairs_scan_engine.py` instead (opt-in via
+    `scripts/run_pairs_scan_backtest.py`; results in
+    `backtests/reports/pairs_scan_report.md`). This function's single-pair
+    behavior is deliberately unchanged by that work.
     """
     cfg = config or PairsBacktestConfig()
     strategy = PairsTradingStrategy(entry_z=cfg.entry_z, exit_z=cfg.exit_z)
