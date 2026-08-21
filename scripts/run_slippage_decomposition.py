@@ -44,6 +44,32 @@ reported for both so a divergence is visible instead of assumed away. The
 decomposition is a comparison of two achievable paths, not an accounting
 identity over one fixed path.
 
+Bar-loading caveat, and why the reproduction check can trip harmlessly: this
+script loads the 1m panel from `start - _MAX_WARMUP_DAYS` so that every cell,
+including orb_vwap_regime (35 warmup days), actually gets the warmup its
+`SIGNAL_WARMUP_DAYS` entry asks for. The published runs went through
+`run_intraday_backtest.py`'s `_load_bars_for_args`, which loads exactly
+[start, end) — so `build_intraday_backtest_fn`'s `warmup_start = start -
+warmup_days` slice had nothing before `start` to reach into, and those runs
+effectively had ZERO warmup regardless of what SIGNAL_WARMUP_DAYS declared.
+A replay here therefore hands the first session a real `prior_day_bars` that
+the published run did not have, which can add a few fills near the window
+start. Observed on vsa_no_demand 5m: 248 fills here vs 245 published
+(+1.2%), same direction, PF 0.789 vs 0.801.
+
+So a SMALL reproduction gap in the direction of more fills is expected and
+benign. A gap that survives the load range is not: auction_reclaim 5m
+replays to 41 fills / PF 1.332 against 50 / 1.163 published, and three
+different panel start dates (2025-08-01, 2025-07-31, 2025-06-22) all give
+byte-identical 41 / 1.3323 — that one is code drift, not warmup, and its
+signal file was untracked until the pinning commit so there is no diff to
+inspect.
+
+Either way the DECOMPOSITION itself is unaffected: both replays of a cell
+share one bar panel and one parameter set, so slippage-vs-commission is an
+internally consistent comparison even where the absolute level has drifted
+from what was published.
+
 Cells excluded and why:
   * l2_absorption_1m, absorption_breakout_1m — their source reports
     (backtests/reports/_*_validation/A0_grid_full20.json) are per-fold
