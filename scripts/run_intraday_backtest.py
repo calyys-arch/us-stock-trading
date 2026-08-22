@@ -5,9 +5,9 @@ Intraday microstructure signal WFO validation CLI
 Runs walk-forward optimization for sweep_reclaim / fvg_retest / orb_vwap
 against the fixed universe's cached 1-minute bars (python/data/
 intraday_cache.py, built by scripts/backfill_intraday.py), applies the
-intraday research GO (configs/goal.yaml `intraday` block: survival AND of
-drawdown / has_oos_trades / pooled PF >= 1.0 / stress PF, with WFO,
-trade-count, Monte Carlo p5, and the 1.1 edge PF recorded as warnings),
+intraday research GO (configs/goal.yaml `intraday` block: AND of WFO /
+drawdown / has_oos_trades / pooled PF >= 1.0 / Monte Carlo p5 / stress PF,
+with the pooled trade count and the 1.1 edge PF recorded as warnings),
 and writes an honest GO/NO-GO report to backtests/reports/intraday_backtest_report.md.
 
 Same discipline as scripts/run_backtest.py / self_improve_loop.py: report-
@@ -209,22 +209,45 @@ def assemble_intraday_gates(
 ) -> tuple[dict[str, bool], dict[str, bool]]:
     """Split official intraday research checks into hard vs soft.
 
-    Hard AND flips GO/NO-GO: drawdown, has_oos_trades, survival PF, and
-    stress PF (1.5x costs still PF >= floor — not "net PnL > 0").
-    Soft is recorded only: WFO, pooled trade count, Monte Carlo p5, and
-    the 1.1 edge PF bar.
+    Hard AND flips GO/NO-GO: WFO, drawdown, has_oos_trades, survival PF,
+    Monte Carlo p5, and stress PF (1.5x costs still PF >= floor — not
+    "net PnL > 0"). Soft is recorded only: pooled trade count and the 1.1
+    edge PF bar.
+
+    WFO and Monte Carlo p5 were originally soft, which left a hole: they
+    are the only two members that test whether an edge holds up
+    CONSISTENTLY, and nothing that could flip the decision did. Of the
+    four original hard gates, three read out-of-sample folds but only test
+    survival — drawdown merely has to sit inside a limit, has_oos_trades
+    merely has to exceed zero, and the pooled PF concatenates every fold
+    into one basket a few large winners can carry — while the fourth
+    (stress PF) replays `candidate_params` over the same full window those
+    params were selected on, making it the lone in-sample member.
+
+    That combination is gameable by position size, and was demonstrably
+    gamed: backtests/reports/sizing_wfo.md records auction_reclaim_5m at
+    0.75x size clearing all four original hard gates (stress PF 0.970 ->
+    1.019) and being handed a GO while 1 of 8 WFO folds passed, mean OOS
+    Sharpe sat at -6.95 and Monte Carlo p5 at -2.22. Shrinking a position
+    shrinks the measurement noise around an expectancy; it cannot change
+    that expectancy's sign. Promoting these two makes the decision rule
+    require consistency, not merely survival.
+
+    This is strictly a tightening — it can turn a GO into a NO-GO and
+    never the reverse — and it reclassifies nothing in the published
+    matrix, where all 16 cells already fail the original hard AND.
     """
     hard = {
+        "wfo_go": wfo_go,
         "oos_drawdown_within_limit": oos_drawdown_ok,
         "has_oos_trades": has_oos_trades,
         "cost_adjusted_profit_factor": survival_pf_ok,
+        "monte_carlo_p5_sharpe": mc_ok,
         f"stress_slippage_{stress_mult:g}x_pf_ge_1": stress_pf_ok,
     }
     soft = {
-        "wfo_go": wfo_go,
         "min_trades_per_oos_fold": min_trades_ok,
         "edge_profit_factor": edge_pf_ok,
-        "monte_carlo_p5_sharpe": mc_ok,
     }
     return hard, soft
 

@@ -97,10 +97,10 @@ cost_gate:
 
 live_promotion:
   # RESEARCH GO stamp: AND the hard gates that the official runner
-  # actually applies. For intraday that is the survival set in
-  # scripts/run_intraday_backtest.py (drawdown, has_oos_trades,
-  # PF >= min_survival_profit_factor, stress PF), not the old seven-way
-  # AND. Live paper entries use gate_policy below.
+  # actually applies. For intraday that is the set in
+  # scripts/run_intraday_backtest.py (WFO, drawdown, has_oos_trades,
+  # PF >= min_survival_profit_factor, Monte Carlo p5, stress PF).
+  # Live paper entries use gate_policy below.
   require_all_gates_pass: true
   # Self-improve loop (python/backtest/promotion.py): candidate params are
   # written back to configs/strategy.yaml only when their mean OOS Sharpe
@@ -109,11 +109,25 @@ live_promotion:
   min_oos_sharpe_improvement: 0.0
 
 # Official intraday research GO (scripts/run_intraday_backtest.py).
-# HARD AND: drawdown, has_oos_trades, pooled PF >= min_survival_profit_factor,
-# and stress PF >= min_stress_profit_factor. WFO / pooled trade-count /
-# Monte Carlo p5 / the 1.1 edge PF bar are recorded as warnings and do
-# not flip GO. Daily run_backtest.py is unchanged (still uses its own
-# monte_carlo / reality_check gates). cost_gate is not read here.
+# HARD AND: WFO decision, drawdown, has_oos_trades, pooled PF >=
+# min_survival_profit_factor, Monte Carlo p5 >= monte_carlo.min_p5_sharpe,
+# and stress PF >= min_stress_profit_factor. Only the pooled trade count
+# and the 1.1 edge PF bar are recorded as warnings.
+#
+# 2026-08-22: WFO and Monte Carlo p5 were PROMOTED from warnings to hard.
+# They are the only two checks that test whether an edge holds up
+# consistently rather than merely survives, so leaving them unable to flip
+# the decision left the rule gameable by position size — and it was gamed:
+# backtests/reports/sizing_wfo.md has auction_reclaim_5m at 0.75x size
+# clearing every original hard gate (stress PF 0.970 -> 1.019) and being
+# handed a GO on 1-of-8 passing folds, mean OOS Sharpe -6.95, MC p5 -2.22.
+# Shrinking a position shrinks measurement noise around an expectancy; it
+# cannot flip that expectancy's sign. Strictly a tightening: it can only
+# turn GO into NO-GO. Reclassified no published cell — all 16 in the 15x7
+# matrix already failed the original hard AND.
+#
+# Daily run_backtest.py is unchanged (still uses its own monte_carlo /
+# reality_check gates). cost_gate is not read here.
 intraday:
   # 2026-08-18: per-fold 100 fills + PF 1.3 made sparse Creamer/VSA
   # signals structurally NO-GO even when the year was net-positive.
@@ -124,7 +138,11 @@ intraday:
   profit_factor_mode: pooled
   min_survival_profit_factor: 1.0     # HARD: do not lose money after costs
   min_cost_adjusted_profit_factor: 1.1  # SOFT: 10% after-cost edge
-  min_stress_profit_factor: 1.0       # HARD: stress PF, not "PnL > 0"
+  min_stress_profit_factor: 1.0       # HARD: stress PF, not "PnL > 0".
+                                      # NOTE: the only hard gate computed
+                                      # in-sample (full-window replay of the
+                                      # params chosen on that window), which
+                                      # is why it must not be the swing vote.
   stress_slippage_multiplier: 1.5     # 2.0x was vetoing thin but real edges
 
 # Live paper ENTRY policy (python/analytics/gate_policy.py).

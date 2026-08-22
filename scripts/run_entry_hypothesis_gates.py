@@ -38,6 +38,7 @@ ENTRY_CATALOG = Path("configs/entry_hypothesis_tests.yaml")
 CHART_RUN_ORDER = (5, 15, 1)
 REPORT_PATH = Path("backtests/reports/entry_hypothesis_gate_report.md")
 REPORT_JSON_PATH = Path("backtests/reports/entry_hypothesis_gate_report.json")
+DECOMPOSITION_JSON = Path("backtests/reports/slippage_decomposition.json")
 
 THESIS = {
     "pairs_trading": "共整合配對價差 z-score 偏離後回歸",
@@ -77,7 +78,26 @@ def _verdict(strategies: list[dict], route_name: str, minutes: int, short: str) 
     return "—"
 
 
-def _cell_meta(cells: dict, route_name: str, minutes: int) -> str:
+def _decomposition_index() -> dict[str, dict]:
+    """Per-cell zero-slippage replay results, keyed by cell, or {} if absent.
+
+    Produced by scripts/run_slippage_decomposition.py. Optional on purpose:
+    the gate report must still render on a machine that has never run it.
+    """
+    if not DECOMPOSITION_JSON.exists():
+        return {}
+    try:
+        payload = json.loads(DECOMPOSITION_JSON.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    return {
+        row["cell"]: row
+        for row in payload.get("results", [])
+        if row.get("cell") and not row.get("error")
+    }
+
+
+def _cell_meta(cells: dict, route_name: str, minutes: int, decomp: dict | None = None) -> str:
     cell = cells.get(_cell_key(route_name, minutes))
     if not cell:
         return "未跑"
@@ -86,12 +106,116 @@ def _cell_meta(cells: dict, route_name: str, minutes: int) -> str:
     fm = cell.get("full_window_metrics") or {}
     src = cell.get("imported_from")
     tag = f", imported={src}" if src else ""
+    if cell.get("superseded"):
+        tag += "、重跑取代匯入值"
     pf = fm.get("profit_factor")
     pf_s = f"{float(pf):.2f}" if pf is not None else "n/a"
+    row = (decomp or {}).get(_cell_key(route_name, minutes)) or {}
+    pre = row.get("pf_pre_cost")
+    if pre is not None:
+        ratio = row.get("edge_cost_ratio")
+        ratio_s = f"{float(ratio):.2f}x" if ratio is not None else "n/a"
+        tag += f"，稅前 PF={float(pre):.2f}／每筆邊緣對成本 {ratio_s}"
     return (
         f"official={cell.get('decision')}, trades={fm.get('n_trades')}, "
         f"PF={pf_s}{tag}"
     )
+
+
+def _decomposition_section(decomp: dict[str, dict]) -> list[str]:
+    """Zero-slippage baseline for every replayable cell.
+
+    This exists because `profit_factor_gross` was read as a pre-cost figure and
+    used to retire signals for "having no edge". It is pre-COMMISSION only —
+    `IntradayTrade.gross_pnl` is computed from slipped fill prices — so the
+    retirement reasoning needed a genuine zero-cost replay to stand on.
+    """
+    if not decomp:
+        return []
+    rows = sorted(
+        decomp.values(),
+        key=lambda r: (int(r.get("chart_minutes") or 0), -(r.get("edge_cost_ratio") or -99)),
+    )
+    slip = sum(float(r.get("slippage") or 0.0) for r in rows)
+    comm = sum(float(r.get("commission") or 0.0) for r in rows)
+    flipped = [r for r in rows
+               if (r.get("pf_pre_cost") or 0) >= 1.0 and (r.get("pf_normal") or 0) < 1.0]
+    L = [
+        "## 成本拆解：關掉滑價之後還剩什麼",
+        "",
+        "`profit_factor_gross` 是 **pre-commission**，不是 pre-cost — `IntradayTrade.gross_pnl`",
+        "由已經過 `_slippage_price` 的成交價算出，`costs` 只含佣金。先前有多格是以",
+        "「`profit_factor_gross` < 1，所以沒有毛邊緣」為由退役的，那個推論站不住。",
+        "下表是凍結參數、同一份棒資料各重播兩次（正常成本／完全零成本）的結果。",
+        "",
+        "| 格子 | 圖 | 筆數 | 成本後 PF | 稅前 PF | 每筆邊緣 | 每筆成本 | 倍數 |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    def _money(value) -> str:
+        amount = float(value or 0.0)
+        return f"-${abs(amount):,.2f}" if amount < 0 else f"${amount:,.2f}"
+
+    for r in rows:
+        pre = r.get("pf_pre_cost")
+        L.append(
+            f"| `{r['cell']}` | {r.get('chart_minutes')}m | {r.get('n_trades_zero')} | "
+            f"{float(r.get('pf_normal') or 0):.3f} | "
+            f"{'—' if pre is None else f'**{float(pre):.3f}**'} | "
+            f"{_money(r.get('edge_per_trade'))} | {_money(r.get('cost_per_trade'))} | "
+            f"{float(r.get('edge_cost_ratio') or 0):.2f} |"
+        )
+    total = slip + comm
+    L.extend([
+        "",
+        f"- 滑價佔總成本 **{(slip / total if total else 0):.1%}**"
+        f"（滑價 ${slip:,.0f}／佣金 ${comm:,.0f}）。成本優化的槓桿幾乎全在成交價，不在佣金方案。",
+        f"- {len(flipped)}／{len(rows)} 格在關掉成本後 PF 翻正，"
+        "所以「沒有毛邊緣」對這些格子是錯的退役理由。",
+        "- 但沒有一格因此得救：每筆成本穩定落在 $150–270、與週期幾乎無關，"
+        "而 1m 訊號每筆邊緣只有 $3–27。正確的說法是「邊緣小於執行成本」，不是「沒有邊緣」。",
+        "- 「倍數」= 每筆稅前邊緣 ÷ 每筆總成本。壓力閘門把滑價乘 1.5，倍數需在滑價那塊留餘裕才可能存活。",
+        "- 完整逐格拆解：`backtests/reports/slippage_decomposition.md`",
+        "",
+    ])
+    return L
+
+
+def _supersede_section(cells: dict) -> list[str]:
+    """Cells whose imported numbers were replaced by a re-run, with the old values.
+
+    Kept in the report rather than only in the JSON so the audit trail is
+    visible to a reader who never opens the raw payload.
+    """
+    replaced = sorted(
+        ((k, c["superseded"]) for k, c in cells.items() if c.get("superseded")),
+        key=lambda kv: kv[0],
+    )
+    if not replaced:
+        return []
+    L = [
+        "## 重跑取代的匯入值",
+        "",
+        "以下格子原本沿用舊報告的數字，但那些數字無法用現行已進版控的程式碼重現，",
+        "已用重跑結果取代。舊值保留在 JSON 的 `superseded` 欄位供稽核。",
+        "",
+        "| 格子 | 舊來源 | 舊筆數 | 舊 PF | 舊淨額 | 新筆數 | 新 PF | 新淨額 |",
+        "|---|---|---:|---:|---:|---:|---:|---:|",
+    ]
+    for key, old in replaced:
+        new = cells[key].get("full_window_metrics") or {}
+
+        def _n(value, spec: str) -> str:
+            return "—" if value is None else format(float(value), spec)
+
+        L.append(
+            f"| `{key}` | `{old.get('imported_from') or '本地'}` | "
+            f"{old.get('n_trades') or '—'} | {_n(old.get('profit_factor'), '.3f')} | "
+            f"{_n(old.get('total_net_pnl'), ',.0f')} | "
+            f"{new.get('n_trades') or '—'} | {_n(new.get('profit_factor'), '.3f')} | "
+            f"{_n(new.get('total_net_pnl'), ',.0f')} |"
+        )
+    L.append("")
+    return L
 
 
 def _render(payload: dict) -> str:
@@ -112,17 +236,24 @@ def _render(payload: dict) -> str:
         "計分規則：每個（假設 × 圖）只跑一次 WFO／Monte Carlo／1.5x 成本壓力測試，",
         "記下七個布林值，然後各閘門各判一次。PASS 只表示那一道閘門過了。",
         "",
-        "七道閘門：",
+        "七道閘門（「官方」欄標示它是否參與 hard AND，2026-08-22 起 `wfo_go` 與",
+        "`monte_carlo_p5_sharpe` 由 warning 升為硬閘門，理由見 `sizing_wfo.md`）：",
         "",
-        "| 閘門 | 單獨在問什麼 |",
-        "|---|---|",
-        "| `wfo_go` | 走步最佳化本身是否判 GO（折通過比例／OOS Sharpe） |",
-        "| `oos_drawdown_within_limit` | 每個 OOS 折的最大回撤是否 ≤ 25% |",
-        "| `has_oos_trades` | 是否至少有一個 OOS 折真正平倉過 |",
-        "| `min_trades_per_oos_fold` | 全部 OOS 折合計成交是否 ≥ 40（pooled） |",
-        "| `cost_adjusted_profit_factor` | 成本後 pooled PF 是否 ≥ 1.0 |",
-        "| `monte_carlo_p5_sharpe` | bootstrap 第 5 百分位 Sharpe 是否 ≥ 0 |",
-        "| `stress_slippage_1.5x_pf_ge_1` | 成本 1.5 倍後 PF 是否仍 ≥ 1 |",
+        "| 閘門 | 單獨在問什麼 | 官方 |",
+        "|---|---|---|",
+        "| `wfo_go` | 走步最佳化本身是否判 GO（折通過比例／OOS Sharpe） | 硬（2026-08-22 升級） |",
+        "| `oos_drawdown_within_limit` | 每個 OOS 折的最大回撤是否 ≤ 25% | 硬 |",
+        "| `has_oos_trades` | 是否至少有一個 OOS 折真正平倉過 | 硬 |",
+        "| `min_trades_per_oos_fold` | 全部 OOS 折合計成交是否 ≥ 40（pooled） | 軟 |",
+        "| `cost_adjusted_profit_factor` | 成本後 pooled PF 是否 ≥ 1.0 | 硬 |",
+        "| `monte_carlo_p5_sharpe` | bootstrap 第 5 百分位 Sharpe 是否 ≥ 0 | 硬（2026-08-22 升級） |",
+        "| `stress_slippage_1.5x_pf_ge_1` | 成本 1.5 倍後 PF 是否仍 ≥ 1 | 硬（唯一樣本內） |",
+        "",
+        "硬閘門裡只有壓力閘門是樣本內的（用 `candidate_params` 在挑出它的同一段全窗重播）。",
+        "把它當成唯一可翻的搖擺票，就能靠縮小部位換到 GO —— `sizing_wfo.md` 記錄了",
+        "`auction_reclaim_5m` 在 0.75x 部位下正是這樣拿到假陽性 GO 的（8 折過 1 折、",
+        "OOS Sharpe −6.95、MC p5 −2.22）。升級 `wfo_go` 與 `monte_carlo_p5_sharpe` 之後",
+        "這條路被堵住；此變更只會讓 GO 變 NO-GO，不會反向，且未改動本矩陣任何一格的決策。",
         "",
         "## 為什麼不是每格都有 1m／5m／15m",
         "",
@@ -144,6 +275,10 @@ def _render(payload: dict) -> str:
         lines.append(f"**尚未跑完的 WFO 格子：** {', '.join(pending)}")
         lines.append("")
 
+    decomp = _decomposition_index()
+    lines.extend(_decomposition_section(decomp))
+    lines.extend(_supersede_section(cells))
+
     for route in routes:
         lines.append(f"## `{route.name}`")
         lines.append("")
@@ -154,7 +289,7 @@ def _render(payload: dict) -> str:
         if route.kind == "daily":
             lines.append("| 時間框架 | WFO 摘要 |")
             lines.append("|---|---|")
-            lines.append(f"| daily | {_cell_meta(cells, route.name, 0)} |")
+            lines.append(f"| daily | {_cell_meta(cells, route.name, 0, decomp)} |")
             lines.append("")
             lines.append("| 閘門 | daily | 1m | 5m | 15m |")
             lines.append("|---|---|---|---|---|")
@@ -172,7 +307,7 @@ def _render(payload: dict) -> str:
             if minutes not in planned:
                 lines.append(f"| {minutes}m | 不適用（{route.kind}） |")
             else:
-                lines.append(f"| {minutes}m | {_cell_meta(cells, route.name, minutes)} |")
+                lines.append(f"| {minutes}m | {_cell_meta(cells, route.name, minutes, decomp)} |")
         lines.append("")
         lines.append("| 閘門 | 1m | 5m | 15m |")
         lines.append("|---|---|---|---|")

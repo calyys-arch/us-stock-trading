@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+from datetime import date
 from pathlib import Path
 
 from fpdf import FPDF
@@ -10,6 +12,24 @@ from fpdf.enums import Align, TableCellFillMode, XPos, YPos
 ROOT = Path(__file__).resolve().parents[1]
 OUT = ROOT / "entry_hypothesis_results_report.pdf"
 FONT = Path("/Library/Fonts/Arial Unicode.ttf")
+DECOMPOSITION_JSON = ROOT / "backtests/reports/slippage_decomposition.json"
+GATE_JSON = ROOT / "backtests/reports/entry_hypothesis_gate_report.json"
+SIZING_JSON = ROOT / "backtests/reports/sizing_wfo.json"
+BUILT_ON = date.today().isoformat()
+
+
+def _load(path: Path) -> dict:
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+
+
+def _money(value, spec: str = ",.2f") -> str:
+    if value is None:
+        return "—"
+    amount = float(value)
+    return f"−${abs(amount):{spec}}" if amount < 0 else f"${amount:{spec}}"
 
 # A4: 210 x 297 mm. Tight but printable margins.
 L, R, T, B = 12.0, 12.0, 16.0, 16.0
@@ -24,7 +44,7 @@ class ReportPDF(FPDF):
         self.set_y(7)
         self.cell(0, 5, "15 個進場假設：獨立七閘門結果報告", align=Align.L)
         self.set_x(self.l_margin)
-        self.cell(0, 5, "A4 列印版  ·  2026-08-20  ·  單閘門 PASS 不是上線", align=Align.R)
+        self.cell(0, 5, f"A4 列印版  ·  {BUILT_ON}  ·  單閘門 PASS 不是上線", align=Align.R)
         self.set_draw_color(180, 180, 180)
         self.set_line_width(0.2)
         y = 13
@@ -39,7 +59,7 @@ class ReportPDF(FPDF):
         self.set_y(-9)
         self.set_font("CJK", size=8)
         self.set_text_color(90, 90, 90)
-        self.cell(0, 5, "官方研究 GO 仍是 hard AND。0 個研究 GO。", align=Align.L)
+        self.cell(0, 5, "官方研究 GO 是六道硬閘門的 AND。0 個研究 GO。", align=Align.L)
         self.set_x(self.l_margin)
         self.cell(0, 5, f"{self.page_no()}/{{nb}}", align=Align.R)
         self.set_text_color(0, 0, 0)
@@ -73,10 +93,12 @@ class ReportPDF(FPDF):
         self.multi_cell(0, 5.5, text)
         self.ln(1)
 
+    # Justified alignment stretches inter-word gaps badly on mixed CJK/ASCII
+    # lines, so prose is left-aligned throughout.
     def body(self, text: str) -> None:
         self._full()
         self.set_font("CJK", size=9)
-        self.multi_cell(0, 4.6, text)
+        self.multi_cell(0, 4.6, text, align=Align.L)
         self.ln(1.2)
 
     def bullet(self, text: str) -> None:
@@ -84,7 +106,7 @@ class ReportPDF(FPDF):
         self.set_font("CJK", size=9)
         self.set_x(self.l_margin)
         self.cell(4, 4.6, "•")
-        self.multi_cell(self.w - self.r_margin - self.get_x(), 4.6, text)
+        self.multi_cell(self.w - self.r_margin - self.get_x(), 4.6, text, align=Align.L)
         self.ln(0.4)
 
     def callout(self, title: str, body: str) -> None:
@@ -98,18 +120,18 @@ class ReportPDF(FPDF):
         self.set_font("CJK", size=9)
         title_h = 5.5
         self.set_xy(x + 3, y + 2)
-        self.multi_cell(w - 6, title_h, title)
+        self.multi_cell(w - 6, title_h, title, align=Align.L)
         y2 = self.get_y()
         self.set_xy(x + 3, y2)
-        self.multi_cell(w - 6, 4.4, body)
+        self.multi_cell(w - 6, 4.4, body, align=Align.L)
         y3 = self.get_y() + 2
         self.rect(x, y, w, y3 - y, style="DF")
         # redraw text on top of fill
         self.set_xy(x + 3, y + 2)
         self.set_font("CJK", size=9)
-        self.multi_cell(w - 6, title_h, title)
+        self.multi_cell(w - 6, title_h, title, align=Align.L)
         self.set_xy(x + 3, self.get_y())
-        self.multi_cell(w - 6, 4.4, body)
+        self.multi_cell(w - 6, 4.4, body, align=Align.L)
         self.set_y(y3 + 2)
 
     def _need(self, h: float) -> None:
@@ -156,6 +178,184 @@ class ReportPDF(FPDF):
         )
 
 
+def _section_decomposition(pdf: "ReportPDF") -> None:
+    """Zero-slippage replay per cell, from scripts/run_slippage_decomposition.py.
+
+    Rendered from the JSON rather than transcribed so the PDF cannot drift from
+    the numbers it cites.
+    """
+    rows = [r for r in (_load(DECOMPOSITION_JSON).get("results") or []) if not r.get("error")]
+    if not rows:
+        return
+    rows.sort(key=lambda r: (int(r.get("chart_minutes") or 0),
+                             -(r.get("edge_cost_ratio") or -99)))
+    slip = sum(float(r.get("slippage") or 0.0) for r in rows)
+    comm = sum(float(r.get("commission") or 0.0) for r in rows)
+    total = slip + comm
+    flipped = sum(1 for r in rows
+                  if (r.get("pf_pre_cost") or 0) >= 1.0 and (r.get("pf_normal") or 0) < 1.0)
+
+    pdf.h2("9. 成本拆解：關掉滑價之後還剩什麼")
+    pdf.body(
+        "多格訊號當初以「profit_factor_gross 低於 1，沒有毛邊緣，成本工程救不了」為由退役。"
+        "那個推論建立在誤讀上：IntradayTrade.gross_pnl 由已經過 _slippage_price 的成交價算出，"
+        "costs 只含佣金，所以 profit_factor_gross 是 pre-commission，不是 pre-cost。"
+        "下表用凍結參數、同一份棒資料各重播兩次（正常成本／完全零成本）量出真正的稅前邊緣。"
+    )
+    pdf.table(
+        ["格子", "圖", "筆數", "成本後 PF", "稅前 PF", "每筆邊緣", "每筆成本", "倍數"],
+        [
+            [
+                r["cell"], f"{r.get('chart_minutes')}m", str(r.get("n_trades_zero")),
+                f"{float(r.get('pf_normal') or 0):.3f}",
+                "—" if r.get("pf_pre_cost") is None else f"{float(r['pf_pre_cost']):.3f}",
+                _money(r.get("edge_per_trade")), _money(r.get("cost_per_trade")),
+                f"{float(r.get('edge_cost_ratio') or 0):.2f}",
+            ]
+            for r in rows
+        ],
+        [1.6, 0.5, 0.7, 0.9, 0.8, 0.9, 0.9, 0.6],
+    )
+    pdf.bullet(
+        f"滑價佔總成本 {(slip / total if total else 0):.1%}"
+        f"（滑價 {_money(slip, ',.0f')}／佣金 {_money(comm, ',.0f')}）。"
+        "成本優化的槓桿幾乎全在成交價，調佣金方案沒有意義。"
+    )
+    pdf.bullet(
+        f"{flipped}／{len(rows)} 格在關掉成本後 PF 翻正。"
+        "「沒有毛邊緣」對這些格子是錯的退役理由，正確說法是「邊緣小於執行成本」。"
+    )
+    pdf.bullet(
+        "但沒有一格因此得救：每筆成本穩定落在 $150–270、與週期幾乎無關，"
+        "而 1m 訊號每筆邊緣只有 $3–27。要救 1m 得把成本壓到十分之一，那不是調參數的量級。"
+    )
+    pdf.bullet(
+        "唯一倍數過 1 的是 auction_reclaim 5m（1.91），但它只有 41 筆，統計上不能證明什麼。"
+        "vwap_band_fade 1m 與 obv_divergence 5m 連稅前都是負的——原退役理由對這兩格成立。"
+    )
+    pdf.body(
+        "「倍數」= 每筆稅前邊緣 ÷ 每筆總成本。壓力閘門把滑價乘 1.5，"
+        "倍數要在滑價那一塊上留餘裕才可能存活。逐格明細見 backtests/reports/slippage_decomposition.md。"
+    )
+
+
+def _section_superseded(pdf: "ReportPDF") -> None:
+    """Cells whose imported numbers failed to reproduce and were re-run."""
+    cells = _load(GATE_JSON).get("cells") or {}
+    replaced = sorted(
+        ((k, c["superseded"], c.get("full_window_metrics") or {})
+         for k, c in cells.items() if c.get("superseded")),
+        key=lambda t: t[0],
+    )
+    if not replaced:
+        return
+
+    pdf.h2("10. 重跑取代的匯入值")
+    pdf.body(
+        "下列格子原本沿用舊報告的數字，但那些數字無法用現行已進版控的程式碼重現，已用重跑結果取代。"
+        "舊值保留在 entry_hypothesis_gate_report.json 的 superseded 欄位供稽核。"
+    )
+    pdf.table(
+        ["格子", "舊來源", "舊筆數", "舊 PF", "舊淨額", "新筆數", "新 PF", "新淨額"],
+        [
+            [
+                key, str(old.get("imported_from") or "本地"),
+                str(old.get("n_trades") or "—"),
+                "—" if old.get("profit_factor") is None else f"{float(old['profit_factor']):.3f}",
+                _money(old.get("total_net_pnl"), ",.0f"),
+                str(new.get("n_trades") or "—"),
+                "—" if new.get("profit_factor") is None else f"{float(new['profit_factor']):.3f}",
+                _money(new.get("total_net_pnl"), ",.0f"),
+            ]
+            for key, old, new in replaced
+        ],
+        [1.3, 2.2, 0.6, 0.6, 0.9, 0.6, 0.6, 0.9],
+    )
+    pdf.bullet(
+        "兩格 ORB 的舊數字之所以樂觀，是因為它們沿用更舊的報告，而本該取代它們的重新驗證"
+        "（2026-08-06 排入）中途死掉、從未產出。重跑後 WFO 由 3/8 掉到 0/8，"
+        "OOS Sharpe 由 +0.96 / +1.41 變成 −6.24 / −5.40。"
+    )
+    pdf.bullet(
+        "新數字有交叉驗證：orb_vwap 1m 的 WFO 獨立跑出 18,788 筆 / PF 0.636，"
+        "而零成本拆解用凍結參數重播得到 18,792 筆 / PF 0.636。兩條獨立路徑收斂，離群的是舊值。"
+    )
+    pdf.bullet(
+        "auction_reclaim 5m 的差異是程式碼漂移：訊號檔在釘版提交前未進版控，"
+        "產生原數字的程式碼已不存在。重跑後 111 筆 / PF 1.198，仍卡在壓力 PF 0.970。"
+    )
+
+
+def _section_gate_tightening(pdf: "ReportPDF") -> None:
+    """The gate set's own failure, and the fix. Documented here rather than
+    left in a side report because it changes what a GO in this report means."""
+    sizing = _load(SIZING_JSON)
+    if not sizing:
+        return
+    base = sizing.get("baseline") or {}
+    arms = sizing.get("arms") or []
+    if not arms:
+        return
+    arm = arms[0]
+
+    pdf.h2("11. 閘門集合自己的失效，以及修法")
+    pdf.body(
+        "2026-08-22 把 wfo_go 與 monte_carlo_p5_sharpe 由 warning 升為硬閘門。"
+        "起因不是理念，是一個具體的假陽性。"
+    )
+    pdf.body(
+        f"把 {sizing.get('cell')} 的部位縮到 "
+        f"{arm.get('size_factor', 0):.2f}x（risk 與名目上限同步縮放）之後，"
+        "壓力閘門翻成 PASS，舊制四道硬閘門全過，管線判它 GO——"
+        "而這是整場戰役第一個日內 GO。"
+    )
+    pdf.table(
+        ["指標", f"{base.get('size_factor', 1.0):.2f}x（基準）",
+         f"{arm.get('size_factor', 0):.2f}x", "性質"],
+        [
+            ["壓力 PF（1.5×）", f"{base.get('stress_profit_factor', 0):.3f}",
+             f"{arm.get('stress_profit_factor', 0):.3f}", "樣本內"],
+            ["全窗 PF", f"{base.get('profit_factor', 0):.3f}",
+             f"{arm.get('profit_factor', 0):.3f}", "樣本內"],
+            ["全窗淨額", _money(base.get("total_net_pnl"), ",.0f"),
+             _money(arm.get("total_net_pnl"), ",.0f"), "樣本內"],
+            ["WFO 折通過率", f"{base.get('wfo_pass_ratio', 0):.3f}",
+             f"{arm.get('wfo_pass_ratio', 0):.3f}", "樣本外"],
+            ["OOS Sharpe 平均", f"{base.get('oos_sharpe_mean', 0):+.2f}",
+             f"{arm.get('oos_sharpe_mean', 0):+.2f}", "樣本外"],
+            ["MC p5 Sharpe", f"{base.get('mc_p5_sharpe', 0):+.2f}",
+             f"{arm.get('mc_p5_sharpe', 0):+.2f}", "樣本外"],
+            ["官方決策", str(base.get("decision")), str(arm.get("decision")), "舊制"],
+            ["同數字、新制", str(base.get("decision_under_current_gates")),
+             str(arm.get("decision_under_current_gates")), "現行"],
+        ],
+        [1.3, 1.2, 1.2, 0.8],
+    )
+    pdf.bullet(
+        "樣本內欄全部改善，樣本外欄一個都沒動：折通過率仍是 8 折過 1 折。"
+        "縮小部位壓低的是期望值周圍的量測噪音，不會改變期望值的正負號。"
+    )
+    pdf.bullet(
+        "舊制四道硬閘門裡，三道雖讀樣本外的折，但只測「活得下來」："
+        "回撤只要在上限內、有成交只要大於零、彙總 PF 把八折併成一個池子讓少數幾筆大贏撐住。"
+        "第四道（壓力）是唯一樣本內的，於是成為唯一可翻的搖擺票。"
+    )
+    pdf.bullet(
+        "真正測「穩定」的 wfo_go 與 MC p5 當時都動不了決策——硬／軟的切分和資訊所在的位置是反的。"
+        "升級後硬閘門六道，此變更只會讓 GO 變 NO-GO，不會反向。"
+    )
+    pdf.bullet(
+        "本矩陣 16 格、112 個計分列的決策與閘門布林值完全未變："
+        "它們原本就沒過舊制的硬 AND。這是預防性修補，不是重新評分。"
+    )
+    pdf.bullet(
+        "同批發現的引擎錯誤：run_intraday_stress_test 逐欄搬運 engine config，"
+        "把 sizing 與成本參數退回預設值，使第一次 0.75x 壓力測試實際跑在 1.00x 部位上、"
+        "輸出位元級等於基準。已改為整份繼承並加上回歸測試。"
+        "既有呼叫點只設定有被搬運的三個欄位，已發布數字均未受影響。"
+    )
+
+
 def build() -> Path:
     if not FONT.exists():
         raise FileNotFoundError(f"Missing CJK font: {FONT}")
@@ -189,7 +389,8 @@ def build() -> Path:
     pdf.multi_cell(
         0,
         4.6,
-        "2026-08-20  ·  A4 直式  ·  從既有官方報告拆開，不是新的 15×7×3 WFO",
+        f"{BUILT_ON}  ·  A4 直式  ·  多數格子已有 WFO；部分自官方報告匯入，第 10 節列出被重跑取代者",
+        align=Align.L,
     )
     pdf.set_text_color(0, 0, 0)
     pdf.ln(2)
@@ -199,14 +400,23 @@ def build() -> Path:
     pdf.ln(3)
 
     pdf.callout(
-        "結論：0 個官方研究 GO。",
+        "結論：0 個官方研究 GO。真正的瓶頸是每筆邊緣小於每筆執行成本。",
         "獨立拆開七道閘門後，活動閘門（有單、樣本、常常還有折回撤）幾乎全過；"
         "錢閘門（成本後 PF、壓力 PF、Monte Carlo p5）幾乎全不過。這就是 hard AND 一直是 NO-GO 的原因。"
-        "單閘門 PASS 不是上線，也不是 paper 開單依據。",
+        "零成本重播進一步指出死因：每筆總成本穩定落在 $150–270 且與週期幾乎無關，"
+        "而 1m 訊號每筆稅前邊緣只有 $3–27。單閘門 PASS 不是上線，也不是 paper 開單依據。",
     )
 
-    pdf.h2("0. 讀這份報告前先知道三件事")
-    pdf.bullet("新的 15×7×3 套件尚未跑完。entry_hypothesis_gate_report.md 仍是空骨架。下面每一格都是從既有官方報告拆開，不是新 WFO 重跑。")
+    pdf.h2("0. 讀這份報告前先知道四件事")
+    pdf.bullet(
+        "15×7 矩陣已大致跑完，仍有 9 格沒有 WFO（absorption_breakout 5m/15m、auction_reclaim 1m、"
+        "vsa_effort 1m/5m、vsa_no_demand 1m/15m、obv_divergence 1m/15m）。已完成的格子有些是新 WFO、"
+        "有些是從官方報告匯入，第 10 節列出被重跑取代的那幾格。"
+    )
+    pdf.bullet(
+        "「沒有毛邊緣」這個退役理由對多數 1m 訊號是錯的。profit_factor_gross 是 pre-commission 而非 "
+        "pre-cost，真正關掉滑價後 9 格裡有 6 格 PF 翻正。但沒有一格因此得救——見第 9 節。"
+    )
     pdf.bullet("閘門地板曾經改過。舊日內管線常用 PF ≥ 1.3、2× 滑價後淨損益 > 0、WFO ≥ 60%。現在獨立計分用：pooled PF ≥ 1.0、1.5× 成本後 PF ≥ 1、WFO ≥ 50%（日線 pairs 掃描仍用 60%）。舊報告若沒有 1.5× PF，標「以 2× 外推」。")
     pdf.bullet("不要把 demo / 合成跑次當證據。volume_route_strategies.json 目前視窗仍是 2025-01-02 .. 2025-05-22 合成資料、0 筆成交。vsa_effort 報告也是合成 demo。")
 
@@ -255,19 +465,24 @@ def build() -> Path:
 
     pdf.h2("2. 七道閘門各自在問什麼")
     pdf.table(
-        ["閘門", "地板", "單獨在擋什麼"],
+        ["閘門", "地板", "單獨在擋什麼", "官方"],
         [
-            ["wfo_go", "折通過率 ≥ 50%（pairs 掃描 60%）", "走步最佳化本身有沒有穩定外推"],
-            ["oos_drawdown_within_limit", "每個 OOS 折 |DD| ≤ 25%", "有沒有單折爆倉"],
-            ["has_oos_trades", "至少一個 OOS 折成交 > 0", "擋「全零報酬卻被標 GO」的空轉"],
-            ["min_trades_per_oos_fold", "全部 OOS 折合計 ≥ 40", "樣本夠不夠談 PF / MC"],
-            ["cost_adjusted_profit_factor", "pooled 成本後 PF ≥ 1.0", "扣完成本還有沒有正期望"],
-            ["monte_carlo_p5_sharpe", "bootstrap p5 Sharpe ≥ 0", "排序／尾部一換，還是不是正的"],
-            ["stress_slippage_1.5x_pf_ge_1", "成本 1.5× 後 PF ≥ 1", "不是「淨損益 > 0」"],
+            ["wfo_go", "折通過率 ≥ 50%（pairs 掃描 60%）", "走步最佳化本身有沒有穩定外推", "硬*"],
+            ["oos_drawdown_within_limit", "每個 OOS 折 |DD| ≤ 25%", "有沒有單折爆倉", "硬"],
+            ["has_oos_trades", "至少一個 OOS 折成交 > 0", "擋「全零報酬卻被標 GO」的空轉", "硬"],
+            ["min_trades_per_oos_fold", "全部 OOS 折合計 ≥ 40", "樣本夠不夠談 PF / MC", "軟"],
+            ["cost_adjusted_profit_factor", "pooled 成本後 PF ≥ 1.0", "扣完成本還有沒有正期望", "硬"],
+            ["monte_carlo_p5_sharpe", "bootstrap p5 Sharpe ≥ 0", "排序／尾部一換，還是不是正的", "硬*"],
+            ["stress_slippage_1.5x_pf_ge_1", "成本 1.5× 後 PF ≥ 1", "不是「淨損益 > 0」", "硬†"],
         ],
-        [1.6, 1.6, 2.0],
+        [1.5, 1.5, 1.7, 0.5],
     )
     pdf.body("關掉 has_oos_trades 不會變出新的官方 GO：零成交仍會死在 PF 與壓力。")
+    pdf.body(
+        "* 2026-08-22 由 warning 升為硬閘門，理由見第 11 節。"
+        "† 壓力閘門是六道硬閘門裡唯一樣本內的一道——它用 candidate_params "
+        "在挑出這組參數的同一段全窗上重播。"
+    )
 
     pdf.h2("3. 獨立七閘門總表")
     pdf.body("圖例：P = PASS，F = FAIL，— = 不是該假設的決策圖，? = 舊報告沒有用現在的地板單獨量過。壓力欄：VSA / OBV 是真正的 1.5× PF。其餘多半只有 2×；2× PF 已經 < 1 時記 F。")
@@ -308,15 +523,18 @@ def build() -> Path:
         [
             ["sweep_reclaim", "F 0%", "P", "P ~104k", "F 0.55", "F −31.5", "F −$53.3M", "RETIRED"],
             ["fvg_retest", "F 0%", "P", "P", "F 0.20", "F −20.5", "F −$4.35M", "RETIRED"],
-            ["orb_vwap（修 bug）", "Sharpe −6.73", "P", "P", "F 0.57；救援 IS 1.00", "F", "HO F 0.71 −$93k", "RETIRED"],
-            ["orb_vwap_regime", "F 38–50%", "P", "P 17725", "F 0.89–0.97", "F −2.3", "F −$2.9M", "RETIRED"],
+            ["orb_vwap（2026-08-21 重跑）", "F 0/8 −5.40", "F −94.4%", "P 18788", "F 0.636", "F −10.3", "F 1.5×", "RETIRED"],
+            ["orb_vwap_regime（重跑）", "F 0/8 −6.24", "F −90.2%", "P 15379", "F 0.643", "F −9.77", "F 1.5×", "RETIRED"],
             ["vwap_band_fade", "F 0/8", "P", "P 5452", "F 0.58–0.60", "F −12", "F −$1.7M", "RETIRED"],
             ["vp_breakout", "F 0%", "P", "P 1816", "F 0.46–0.52", "F −10", "F −$0.8M", "RETIRED"],
             ["l2_absorption", "F 0/7", "?", "P 3095", "F 0.38（毛 0.39）", "F", "F −$2.03M", "RETIRED"],
         ],
         [1.4, 1.0, 0.4, 0.8, 1.3, 0.7, 1.2, 0.8],
     )
-    pdf.body("orb_vwap 早期「OOS Sharpe +1.41、WFO 62%」是 gap-trap 停損反號 bug，作廢。")
+    pdf.body(
+        "orb_vwap 早期「OOS Sharpe +1.41、WFO 62%」是 gap-trap 停損反號 bug，作廢。"
+        "兩格 ORB 於 2026-08-21 用已釘版的程式碼重跑，舊的匯入值已被取代，明細見第 10 節。"
+    )
 
     pdf.h2("4. 各假設細讀")
 
@@ -329,8 +547,8 @@ def build() -> Path:
             ["年路徑", "245 筆，淨 −$22,309，PF 0.80，最大回撤 −3.6%"],
             ["1.5× 壓力", "245 筆，淨 −$54,193，PF 0.61"],
             ["MC p5 Sharpe", "−3.938"],
-            ["硬閘門", "DD P、有單 P、成本後 PF P、壓力 F"],
-            ["軟閘門", "WFO F、樣本 P、edge PF P、MC F"],
+            ["硬閘門（六道）", "DD P、有單 P、成本後 PF P、壓力 F、WFO F、MC F"],
+            ["軟閘門", "樣本 P、edge PF P"],
         ],
         [1.0, 3.2],
     )
@@ -345,7 +563,7 @@ def build() -> Path:
             ["年路徑", "4120 筆，淨 −$966,938，PF 0.34，最大回撤 −61.6%"],
             ["1.5× 壓力", "淨 −$1,360,753，PF 0.24"],
             ["MC p5", "−22.539"],
-            ["硬閘門", "DD P（折回撤；年路徑已破 25%）、有單 P、PF F、壓力 F"],
+            ["硬閘門（六道）", "DD P（折回撤；年路徑已破 25%）、有單 P、PF F、壓力 F、WFO F、MC F"],
         ],
         [1.0, 3.2],
     )
@@ -461,6 +679,10 @@ def build() -> Path:
     pdf.bullet("換圖有訊息、仍全是負 PF：VSA 留在 5m；OBV 若還要研究，15m 比 5m/1m 不那麼糟。")
     pdf.bullet("官方要 GO：仍然需要 AND。現在沒有候選。")
 
+    _section_decomposition(pdf)
+    _section_superseded(pdf)
+    _section_gate_tightening(pdf)
+
     pdf.ln(4)
     pdf.set_draw_color(0, 0, 0)
     pdf.set_line_width(0.4)
@@ -473,8 +695,10 @@ def build() -> Path:
         0,
         4.2,
         "本 PDF 由 scripts/render_entry_hypothesis_pdf.py 產生，頁面尺寸 ISO 216 A4（210 × 297 mm）。"
-        "文字來源 backtests/reports/entry_hypothesis_results_report.md。"
+        "文字來源 backtests/reports/ 下的 entry_hypothesis_results_report.md、"
+        "entry_hypothesis_gate_report.json、slippage_decomposition.json 與 sizing_wfo.json。"
         "列印建議：100% 實際大小、不縮放、雙面可選。",
+        align=Align.L,
     )
 
     OUT.parent.mkdir(parents=True, exist_ok=True)

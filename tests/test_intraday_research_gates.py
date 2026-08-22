@@ -1,4 +1,5 @@
-"""Official intraday research GO: survival AND, Monte Carlo is a warning."""
+"""Official intraday research GO: consistency AND, only sample-size and the
+1.1 edge PF bar are warnings."""
 from __future__ import annotations
 
 import sys
@@ -25,14 +26,42 @@ def _assemble(*, stress_pf_ok=True, survival_pf_ok=True, mc_ok=True, wfo_go=True
     )
 
 
-def test_monte_carlo_does_not_flip_intraday_go():
-    hard, soft = _assemble(mc_ok=False, wfo_go=False, min_trades_ok=False, edge_pf_ok=False)
+def test_wfo_and_monte_carlo_are_hard():
+    """Promoted 2026-08-22. These two are the only checks that test whether an
+    edge holds up CONSISTENTLY rather than merely survives, so neither may be
+    demoted back to a warning without reopening the hole recorded in
+    backtests/reports/sizing_wfo.md."""
+    hard_mc, _ = _assemble(mc_ok=False)
+    hard_wfo, _ = _assemble(wfo_go=False)
+    assert hard_mc["monte_carlo_p5_sharpe"] is False
+    assert hard_wfo["wfo_go"] is False
+    assert not all(hard_mc.values())
+    assert not all(hard_wfo.values())
+
+
+def test_only_sample_size_and_edge_pf_are_warnings():
+    hard, soft = _assemble(min_trades_ok=False, edge_pf_ok=False)
     assert all(hard.values())
-    assert "monte_carlo_p5_sharpe" not in hard
-    assert soft["monte_carlo_p5_sharpe"] is False
-    assert soft["wfo_go"] is False
-    assert soft["min_trades_per_oos_fold"] is False
-    assert soft["edge_profit_factor"] is False
+    assert soft == {"min_trades_per_oos_fold": False, "edge_profit_factor": False}
+
+
+def test_shrinking_size_cannot_buy_a_go_on_the_in_sample_gate_alone():
+    """The concrete failure this gate set was rewritten to prevent.
+
+    auction_reclaim_5m at 0.75x position size cleared every one of the four
+    original hard gates — the swing vote being the stress gate, the lone
+    in-sample member (it replays the chosen params over the window they were
+    chosen on) — and was handed a GO on 1-of-8 passing WFO folds, mean OOS
+    Sharpe -6.95 and Monte Carlo p5 -2.22. Shrinking a position shrinks the
+    measurement noise around an expectancy; it cannot flip that expectancy's
+    sign, so the decision rule must not be satisfiable that way.
+    """
+    hard, _ = _assemble(
+        oos_drawdown_ok=True, has_oos_trades=True, survival_pf_ok=True,
+        stress_pf_ok=True,      # what 0.75x sizing bought
+        wfo_go=False, mc_ok=False,  # what it did not move
+    )
+    assert not all(hard.values())
 
 
 def test_survival_pf_failure_is_nogo():
