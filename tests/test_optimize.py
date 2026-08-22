@@ -322,3 +322,32 @@ def test_run_intraday_stress_test_increases_cost_vs_normal_run():
         days[0], days[-1] + pd.Timedelta(days=1), stress_slippage_multiplier=2.0,
     )
     assert stress["total_net_pnl"] < normal["total_net_pnl"]
+
+
+def test_run_intraday_stress_test_honors_position_sizing_from_base_cfg():
+    """The stress re-run must inherit the WHOLE base engine config, not a
+    hand-picked subset of its fields.
+
+    This previously regressed silently: run_intraday_stress_test rebuilt the
+    config field-by-field, forwarding only chart_minutes, time_stop_minutes
+    and signal_filter_overrides, so a caller that shrank position size got a
+    stress result computed at DEFAULT size. The failure is invisible in the
+    output — it looks like "sizing does not affect the stress test" — so it
+    needs a test that pins sizing specifically rather than just asserting
+    stress costs more than normal.
+    """
+    bars = _multi_day_orb_bars(n_days=5)
+    days = pd.bdate_range("2024-06-03", periods=5)
+    end = days[-1] + pd.Timedelta(days=1)
+    args = ({"AAA": bars}, "orb_vwap", _ORB_BASE_CFG, {}, days[0], end)
+
+    full = run_intraday_stress_test(*args, stress_slippage_multiplier=2.0)
+    quarter = run_intraday_stress_test(
+        *args, stress_slippage_multiplier=2.0,
+        base_engine_cfg=IntradayBacktestConfig(
+            risk_per_trade_pct=0.01 * 0.25, max_notional_pct=0.2 * 0.25,
+        ),
+    )
+    assert full["n_trades"] > 0 and quarter["n_trades"] > 0
+    # Smaller positions must move less money, in either direction.
+    assert abs(quarter["total_net_pnl"]) < abs(full["total_net_pnl"])

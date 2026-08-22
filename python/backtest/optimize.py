@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import itertools
 import logging
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -489,20 +490,30 @@ def run_intraday_stress_test(
     in effect, since `_slippage_price` applies `stress_slippage_multiplier`
     to the resolved half_spread_bps+impact total, not to the flat constant
     specifically.
-    `base_engine_cfg` copies structural knobs (chart_minutes,
-    time_stop_minutes, signal_filter_overrides) so a 1m/15m WFO is
-    stressed on the same decision chart, not silently reset to 5m."""
+    `base_engine_cfg` is carried over WHOLE (via dataclasses.replace), with
+    only the stress multiplier and the resolved spreads overridden, so a
+    1m/15m WFO is stressed on the same decision chart and — equally important
+    — at the same POSITION SIZE and cost model it was optimized under.
+
+    Copying field-by-field here was a silent-correctness trap: it forwarded
+    chart_minutes/time_stop_minutes/signal_filter_overrides and reset
+    everything else to the dataclass defaults, so a caller that varied
+    `risk_per_trade_pct`, `max_notional_pct`, commission or impact would get a
+    stress run at DEFAULT size and cost while every other metric reflected its
+    own. That produces a stress figure numerically identical to the default-size
+    run — which reads as "sizing had no effect on stress" rather than as a bug.
+    No published report was affected: every pre-existing caller only ever
+    varied the three fields that were being forwarded."""
     base = base_engine_cfg or IntradayBacktestConfig()
     spreads = (
         half_spread_bps_by_symbol
         if half_spread_bps_by_symbol is not None
         else base.half_spread_bps_by_symbol
     )
-    stress_cfg = IntradayBacktestConfig(
+    stress_cfg = replace(
+        base,
         stress_slippage_multiplier=stress_slippage_multiplier,
         half_spread_bps_by_symbol=spreads,
-        chart_minutes=base.chart_minutes,
-        time_stop_minutes=base.time_stop_minutes,
         signal_filter_overrides=dict(base.signal_filter_overrides),
     )
     fn = build_intraday_backtest_fn(bars_by_symbol, signal_name, base_cfg, engine_cfg=stress_cfg, warmup_days=warmup_days)
