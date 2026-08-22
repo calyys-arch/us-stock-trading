@@ -65,6 +65,18 @@ byte-identical 41 / 1.3323 — that one is code drift, not warmup, and its
 signal file was untracked until the pinning commit so there is no diff to
 inspect.
 
+Cost-model caveat on the reproduction check, and the reason it must compare
+against a matching baseline: six 1m cells in the gate report were imported
+from `slippage_calibration_report.json:<signal>.new`, and `.new` there means
+per-symbol CALIBRATED half-spreads, not the flat 2.0bps this script replays
+under. That report's `.old` entry is the flat-cost run of the same signal and
+is the comparable baseline. Calibrated is the more expensive of the two on all
+six (the traded mega-caps average above 2.0bps), so the flat figures are the
+optimistic side, e.g. orb_vwap 0.940 flat vs 0.871 calibrated. Comparing a
+flat replay against a calibrated published number reads as a reproduction
+failure when nothing has drifted, so both baselines are recorded and the
+verdict keys off the flat one where it exists.
+
 Either way the DECOMPOSITION itself is unaffected: both replays of a cell
 share one bar panel and one parameter set, so slippage-vs-commission is an
 internally consistent comparison even where the absolute level has drifted
@@ -96,6 +108,7 @@ from python.backtest.intraday_engine import IntradayBacktestConfig  # noqa: E402
 from python.backtest.optimize import build_intraday_backtest_fn  # noqa: E402
 
 GATE_REPORT = Path("backtests/reports/entry_hypothesis_gate_report.json")
+CALIBRATION_REPORT = Path("backtests/reports/slippage_calibration_report.json")
 STRATEGY_PATH = Path("configs/strategy.yaml")
 OUT_JSON = Path("backtests/reports/slippage_decomposition.json")
 OUT_MD = Path("backtests/reports/slippage_decomposition.md")
@@ -147,6 +160,42 @@ def _run(bars, signal_name, base_cfg, params, minutes, warmup_days, start_ts, en
     return {k: v for k, v in metrics.items() if k != "daily_returns"}
 
 
+def _flat_baseline(signal_name: str) -> dict | None:
+    """The flat-cost run of `signal_name` from the calibration report, if any.
+
+    Its `.old` entry is the flat-cost variant and `.new` the calibrated one;
+    only `.old` is comparable to this script's flat replay.
+    """
+    if not CALIBRATION_REPORT.exists():
+        return None
+    try:
+        report = json.loads(CALIBRATION_REPORT.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    entry = ((report.get("signals") or {}).get(signal_name) or {}).get("old") or {}
+    if not str(entry.get("cost_tag") or "").startswith("flat"):
+        return None
+    metrics = entry.get("full_window_metrics") or {}
+    if metrics.get("total_net_pnl") is None or metrics.get("profit_factor") is None:
+        return None
+    return {
+        "source": f"{CALIBRATION_REPORT.name}:{signal_name}.old",
+        "cost_tag": entry.get("cost_tag"),
+        "net": metrics.get("total_net_pnl"),
+        "pf": metrics.get("profit_factor"),
+        "n_trades": metrics.get("n_trades"),
+    }
+
+
+def _matches(net_replay: float, pf_replay: float, net_ref, pf_ref) -> bool | None:
+    if net_ref is None or pf_ref is None:
+        return None
+    return (
+        abs(net_replay - float(net_ref)) <= max(1.0, 0.01 * abs(float(net_ref)))
+        and abs(pf_replay - float(pf_ref)) <= 0.01
+    )
+
+
 def _fmt(value, spec: str = ".3f", dash: str = "—") -> str:
     if value is None:
         return dash
@@ -196,14 +245,23 @@ def _render_md(payload: dict) -> str:
         L.append(f"- 訊號 `{r['signal']}`，{r['chart_minutes']}m 圖，warmup {r['warmup_days']} 天")
         L.append(f"- 凍結參數：`{json.dumps(r['frozen_params'], sort_keys=True)}`")
         chk = r["reproduction_check"]
+        flat_ref = chk.get("flat_baseline")
+        ref_net = flat_ref["net"] if flat_ref else chk.get("published_net")
+        ref_pf = flat_ref["pf"] if flat_ref else chk.get("published_pf")
+        ref_label = f"`{flat_ref['source']}`（flat 成本）" if flat_ref else "gate 報告"
         if chk.get("matches") is False:
-            L.append(f"- **重現不一致**：published net {_fmt(chk.get('published_net'), ',.0f')} / "
-                     f"PF {_fmt(chk.get('published_pf'))} vs 重播 net {_fmt(r['net_normal'], ',.0f')} / "
+            L.append(f"- **重現不一致**：{ref_label} net {_fmt(ref_net, ',.0f')} / "
+                     f"PF {_fmt(ref_pf)} vs 重播 net {_fmt(r['net_normal'], ',.0f')} / "
                      f"PF {_fmt(r['pf_normal'])} — 此格結論需先解釋差異")
         elif chk.get("matches") is True:
-            L.append(f"- 重現核對：與 published 一致（net、PF 皆在容差內）")
+            L.append(f"- 重現核對：與 {ref_label} 一致（net、PF 皆在容差內）")
         else:
-            L.append("- 重現核對：published 無可比數字")
+            L.append("- 重現核對：無可比數字")
+        if chk.get("matches") and chk.get("matches_published") is False:
+            L.append(f"- gate 報告該格存的是 calibrated 成本"
+                     f"（net {_fmt(chk.get('published_net'), ',.0f')} / "
+                     f"PF {_fmt(chk.get('published_pf'))}），比 flat 貴，故與本次 flat 重播不同；"
+                     f"這不是漂移")
         L.append(f"- 滑價佔總成本 {_fmt(r['slippage_share_of_cost'], '.1%')}；"
                  f"總成本佔稅前淨額 {_fmt(r['cost_share_of_pre_cost'], '.1%')}")
         verdict = r["verdict"]
@@ -227,12 +285,57 @@ def _verdict(pf_pre_cost, pf_normal, ratio) -> str:
             "退役理由需要改寫：這不是「沒有邊緣」，是「邊緣小於執行成本」。")
 
 
+def _rerender() -> int:
+    """Re-score reproduction checks against the flat baseline and rewrite the MD.
+
+    Everything needed is already persisted (`net_normal`, `pf_normal`, `signal`),
+    so this avoids re-running replays purely to relabel a comparison.
+    """
+    payload = json.loads(OUT_JSON.read_text(encoding="utf-8"))
+    gate_cells = (json.loads(GATE_REPORT.read_text(encoding="utf-8")).get("cells") or {})
+    for row in payload.get("results", []):
+        if row.get("error"):
+            continue
+        net_normal, pf_normal = float(row["net_normal"]), float(row["pf_normal"])
+        chk = row.setdefault("reproduction_check", {})
+        published_net = chk.get("published_net")
+        published_pf = chk.get("published_pf")
+        matches_published = _matches(net_normal, pf_normal, published_net, published_pf)
+        flat_ref = _flat_baseline(row["signal"])
+        matches_flat = (
+            _matches(net_normal, pf_normal, flat_ref["net"], flat_ref["pf"])
+            if flat_ref else None
+        )
+        chk.update({
+            "published_cost_model": (gate_cells.get(row["cell"]) or {}).get("cost_model"),
+            "matches_published": matches_published,
+            "flat_baseline": flat_ref,
+            "matches_flat_baseline": matches_flat,
+            "compared_against": "flat_baseline" if flat_ref else "gate_report",
+            "matches": matches_published if matches_flat is None else matches_flat,
+        })
+        status = chk["matches"]
+        tag = {True: "一致", False: "不一致", None: "無可比"}[status]
+        print(f"  {row['cell']:24s} {tag} (vs {chk['compared_against']})", flush=True)
+    _persist(payload)
+    print(f"\nWrote {OUT_JSON}\nWrote {OUT_MD}")
+    return 0
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cells", default=",".join(CELL_ORDER))
     parser.add_argument("--start", default="2025-08-01")
     parser.add_argument("--end", default="2026-07-01")
+    parser.add_argument(
+        "--rerender", action="store_true",
+        help="recompute reproduction checks from the existing JSON and rewrite "
+             "the markdown, without re-running any backtest",
+    )
     args = parser.parse_args()
+
+    if args.rerender:
+        return _rerender()
 
     report = json.loads(GATE_REPORT.read_text(encoding="utf-8"))
     cells = report.get("cells") or {}
@@ -310,13 +413,16 @@ def main() -> int:
 
         published_net = stored.get("total_net_pnl")
         published_pf = stored.get("profit_factor")
-        if published_net is None or published_pf is None:
-            matches = None
-        else:
-            matches = (
-                abs(net_normal - float(published_net)) <= max(1.0, 0.01 * abs(float(published_net)))
-                and abs(float(normal["profit_factor"]) - float(published_pf)) <= 0.01
-            )
+        pf_normal_value = float(normal["profit_factor"])
+        matches_published = _matches(net_normal, pf_normal_value, published_net, published_pf)
+        flat_ref = _flat_baseline(signal_name)
+        matches_flat = (
+            _matches(net_normal, pf_normal_value, flat_ref["net"], flat_ref["pf"])
+            if flat_ref else None
+        )
+        # The gate report's figure for these cells is calibrated-cost while this
+        # replay is flat, so the flat baseline is the one that can agree.
+        matches = matches_published if matches_flat is None else matches_flat
 
         edge_per_trade = (net_pre_cost / n_zero) if n_zero else None
         cost_per_trade = (total_cost / n_zero) if n_zero else None
@@ -345,6 +451,11 @@ def main() -> int:
             "reproduction_check": {
                 "published_net": published_net,
                 "published_pf": published_pf,
+                "published_cost_model": cell.get("cost_model"),
+                "matches_published": matches_published,
+                "flat_baseline": flat_ref,
+                "matches_flat_baseline": matches_flat,
+                "compared_against": "flat_baseline" if flat_ref else "gate_report",
                 "matches": matches,
             },
             "metrics_normal": normal,
@@ -354,8 +465,13 @@ def main() -> int:
         print(f"    -> 稅前 PF {_fmt(pf_pre_cost)} | 滑價 ${slippage:,.0f} | 佣金 ${commission:,.0f} | "
               f"每筆邊緣/成本 {_fmt(ratio, '.2f')}", flush=True)
         if matches is False:
-            print(f"    !! 重現不一致: published net ${float(published_net):,.0f} "
-                  f"PF {float(published_pf):.3f}", flush=True)
+            ref = flat_ref or {"net": published_net, "pf": published_pf,
+                               "source": "gate report"}
+            print(f"    !! 重現不一致（比對 {ref['source']}）: net ${float(ref['net']):,.0f} "
+                  f"PF {float(ref['pf']):.3f}", flush=True)
+        elif matches and matches_published is False:
+            print(f"    (與 flat 基準一致；gate 報告存的是 calibrated 成本，故數字不同)",
+                  flush=True)
         payload["results"].append(row)
         _persist(payload)
 
