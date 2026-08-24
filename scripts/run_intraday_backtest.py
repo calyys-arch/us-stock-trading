@@ -464,6 +464,16 @@ def run_signal(
         "wfo_decision": wfo.decision,
         "wfo_pass_ratio": wfo.pass_ratio,
         "oos_sharpe_mean": wfo.oos_sharpe_mean,
+        # Per-fold detail, so that a pass ratio can be interrogated from the
+        # report instead of only from a live log. Without the trade counts,
+        # absorption_breakout_15m's wfo_go=PASS at an OOS Sharpe mean of -2.861
+        # was indistinguishable in the JSON from a real one: five of its eight
+        # folds never fired, and four of those were scored as passes. Three
+        # cheap lists make that visible to anyone reading the file later.
+        "fold_oos_trades": [int((f.oos_metrics or {}).get("n_trades", 0))
+                            for f in wfo.folds],
+        "fold_oos_sharpes": [f.oos_sharpe for f in wfo.folds],
+        "fold_oos_pass": [bool(f.oos_pass) for f in wfo.folds],
         "candidate_params": candidate_params,
         "full_window_metrics": {k: v for k, v in full_metrics.items() if k != "daily_returns"},
         "stress_metrics": {k: v for k, v in stress_metrics.items() if k != "daily_returns"},
