@@ -32,7 +32,7 @@ import pytest
 from python.backtest import intraday_engine as eng
 from python.backtest.daily_breakout_engine import DailyBreakoutConfig, run_daily_breakout_backtest
 from python.backtest.optimize import build_intraday_backtest_fn, build_pairs_backtest_fn, load_wfo_config
-from python.backtest.walk_forward import WalkForwardOptimizer, WFOConfig
+from python.backtest.walk_forward import WalkForwardOptimizer, WFOConfig, rescore_folds
 from python.core.fees_equity import round_trip_cost
 from python.core.strategies.daily_range_breakout import evaluate_daily_breakout
 from python.microstructure import context as ctx
@@ -183,6 +183,91 @@ def test_wfo_no_folds_when_range_shorter_than_one_fold():
         datetime(2020, 1, 1), datetime(2020, 3, 1))
     assert wfo.folds == []
     assert wfo.decision == "NO-GO"
+
+
+def _wfo_with_quiet_folds(quiet_folds: set[int], n_folds: int = 8, **cfg_kw):
+    """Run a WFO where chosen folds produce no fills at all.
+
+    A signal that goes quiet reports n_trades=0 and sharpe_ratio=0.0 on BOTH
+    the IS and OOS calls, since there is nothing to score either side. That
+    exact shape is what absorption_breakout_15m produced in 3 of its folds.
+    """
+    is_days, oos_days, step = 100, 50, 50
+    start = datetime(2020, 1, 1)
+
+    def backtest_fn(qstart, qend, params):
+        # IS and OOS calls can share a start offset (here both land on
+        # multiples of step), so the fold is identified by window LENGTH.
+        offset = (qstart - start).days
+        is_phase = (qend - qstart).days == is_days
+        fold_idx = (offset if is_phase else offset - is_days) // step
+        if fold_idx in quiet_folds:
+            return {"sharpe_ratio": 0.0, "n_trades": 0}
+        return {"sharpe_ratio": 2.0, "n_trades": 25}
+
+    cfg = WFOConfig(is_days=is_days, oos_days=oos_days, step_days=step, **cfg_kw)
+    end = start + timedelta(days=is_days + step * n_folds)
+    return WalkForwardOptimizer(backtest_fn, cfg, [{}]).run(start, end)
+
+
+def test_wfo_fold_with_zero_trades_is_excluded_not_counted_as_a_pass():
+    """A fold where the signal never fired must not inflate the pass ratio.
+
+    With no trades both Sharpes are 0.0, so the decay test degenerates to
+    `0.0 >= 0` and the absolute test to `0.0 >= 0.0`; both hold and the empty
+    fold used to score as a PASS. That was cosmetic while wfo_go was a
+    warning and decision-flipping once it became a hard gate.
+    """
+    wfo = _wfo_with_quiet_folds({1, 2})
+    empty = [f for f in wfo.folds if not f.is_evaluable]
+    assert len(empty) == 2, "test needs folds that really produced no fills"
+    assert all(not f.oos_pass for f in empty), (
+        "a fold with zero trades was scored as a PASS — this is the "
+        "absorption_breakout_15m false-positive path"
+    )
+    # Excluded from BOTH sides of the ratio, not just the numerator.
+    assert wfo.evaluable_folds == wfo.total_folds - 2
+    assert wfo.passing_folds == wfo.evaluable_folds
+    assert wfo.pass_ratio == pytest.approx(1.0)
+    assert wfo.decision == "GO"
+
+
+def test_wfo_is_inconclusive_when_too_few_folds_traded():
+    """Excluding empty folds must not let a tiny sample buy a GO.
+
+    Two traded folds out of eight, both passing, is a ratio of 1.0 over a
+    sample that cannot support a verdict. `INCONCLUSIVE` keeps that separate
+    from NO-GO, because "we could not tell" is not evidence about the signal.
+    """
+    wfo = _wfo_with_quiet_folds({1, 2, 3, 4, 5, 6})
+    assert wfo.evaluable_folds == 2
+    assert wfo.pass_ratio == pytest.approx(1.0)
+    assert wfo.decision == "INCONCLUSIVE"
+
+
+def test_inconclusive_fails_the_wfo_gate_closed():
+    """Every consumer reads `decision == "GO"`, so INCONCLUSIVE must not be
+    mistaken for a pass anywhere."""
+    wfo = _wfo_with_quiet_folds({1, 2, 3, 4, 5, 6})
+    assert (wfo.decision == "GO") is False
+
+
+def test_wfo_oos_sharpe_mean_ignores_empty_folds():
+    """Averaging 0.0 from folds that never traded drags a losing signal's
+    mean toward zero and makes it read as merely flat."""
+    wfo = _wfo_with_quiet_folds({1, 2, 3})
+    assert wfo.oos_sharpe_mean == pytest.approx(2.0)
+
+
+def test_rescore_folds_reproduces_the_live_verdict_without_rerunning():
+    """Rescoring stored folds must match the live run, so that a completed
+    WFO can be re-judged without repeating the candidate search."""
+    wfo = _wfo_with_quiet_folds({1, 2})
+    again = rescore_folds(wfo.to_dict())
+    assert again.decision == wfo.decision
+    assert again.pass_ratio == pytest.approx(wfo.pass_ratio)
+    assert again.evaluable_folds == wfo.evaluable_folds
+    assert again.passing_folds == wfo.passing_folds
 
 
 # ═════════════════════════════════════════════════════════════════════════

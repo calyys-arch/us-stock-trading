@@ -225,7 +225,7 @@ def assemble_intraday_gates(
     params were selected on, making it the lone in-sample member.
 
     That combination is gameable by position size, and was demonstrably
-    gamed: backtests/reports/sizing_wfo.md records auction_reclaim_5m at
+    gamed: backtests/reports/sizing_wfo_auction_reclaim_5m.md records it at
     0.75x size clearing all four original hard gates (stress PF 0.970 ->
     1.019) and being handed a GO while 1 of 8 WFO folds passed, mean OOS
     Sharpe sat at -6.95 and Monte Carlo p5 at -2.22. Shrinking a position
@@ -386,8 +386,16 @@ def run_signal(
                 "reason": "window too short for a single WFO fold", "data_label": data_label}
 
     # Most-recent fold's winner = the parameters we would trade tomorrow —
-    # same convention as scripts/self_improve_loop.py.
-    candidate_params = dict(wfo.folds[-1].best_params)
+    # same convention as scripts/self_improve_loop.py. With one correction:
+    # the most recent fold that actually TRADED. A fold where the signal never
+    # fired still names a winner, but it won by tying at Sharpe 0.0 against
+    # every other candidate on an empty in-sample window, so its params are an
+    # artifact of grid order rather than a choice. Everything downstream —
+    # the full-window replay, the stress test and the Monte Carlo draw — is
+    # computed from these params, so taking them from an empty fold would
+    # report evidence about a parameter set nothing selected.
+    traded_folds = [f for f in wfo.folds if f.is_evaluable]
+    candidate_params = dict((traded_folds or wfo.folds)[-1].best_params)
     full_metrics = fn(start_ts.to_pydatetime(), end_ts.to_pydatetime(), candidate_params)
     mc_result = MonteCarloValidator(n_sims=500).run(full_metrics.get("daily_returns", []))
     min_p5 = float(goal.get("monte_carlo", {}).get("min_p5_sharpe", 0.0))
@@ -449,6 +457,11 @@ def run_signal(
         "window": f"{start_ts.date()} .. {end_ts.date()}",
         "n_symbols": len(bars_by_symbol),
         "wfo_folds": wfo.total_folds,
+        # Folds that traded. `wfo_pass_ratio` is over these, so recording it
+        # keeps the ratio's denominator visible instead of leaving a reader to
+        # assume it was over wfo_folds.
+        "wfo_evaluable_folds": wfo.evaluable_folds,
+        "wfo_decision": wfo.decision,
         "wfo_pass_ratio": wfo.pass_ratio,
         "oos_sharpe_mean": wfo.oos_sharpe_mean,
         "candidate_params": candidate_params,
@@ -505,8 +518,14 @@ def _render_signal_section(r: dict) -> list[str]:
 
     lines.append(f"- Data: {r['data_label']}")
     lines.append(f"- Window: {r['window']} ({r['n_symbols']} symbols)")
-    lines.append(f"- WFO: {r['wfo_folds']} folds, pass ratio {r['wfo_pass_ratio']:.0%}, "
-                 f"OOS Sharpe mean {r['oos_sharpe_mean']:+.3f}")
+    evaluable = r.get("wfo_evaluable_folds")
+    empty = (r["wfo_folds"] - evaluable) if evaluable is not None else 0
+    wfo_note = f" [{r['wfo_decision']}]" if r.get("wfo_decision") == "INCONCLUSIVE" else ""
+    lines.append(f"- WFO: {r['wfo_folds']} folds"
+                 + (f" ({empty} with no fills, excluded)" if empty else "")
+                 + f", pass ratio {r['wfo_pass_ratio']:.0%}"
+                 + (f" of {evaluable} traded folds" if empty else "")
+                 + f", OOS Sharpe mean {r['oos_sharpe_mean']:+.3f}{wfo_note}")
     lines.append(f"- Monte Carlo p5 Sharpe (full window, candidate params): {r['mc_p5_sharpe']:+.3f}")
     fm = r["full_window_metrics"]
     lines.append(f"- Full-window metrics: n_trades={fm.get('n_trades')}, "

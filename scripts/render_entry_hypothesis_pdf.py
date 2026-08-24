@@ -14,7 +14,7 @@ OUT = ROOT / "entry_hypothesis_results_report.pdf"
 FONT = Path("/Library/Fonts/Arial Unicode.ttf")
 DECOMPOSITION_JSON = ROOT / "backtests/reports/slippage_decomposition.json"
 GATE_JSON = ROOT / "backtests/reports/entry_hypothesis_gate_report.json"
-SIZING_JSON = ROOT / "backtests/reports/sizing_wfo.json"
+SIZING_GLOB = "sizing_wfo_*.json"
 BUILT_ON = date.today().isoformat()
 
 
@@ -289,14 +289,19 @@ def _section_superseded(pdf: "ReportPDF") -> None:
 def _section_gate_tightening(pdf: "ReportPDF") -> None:
     """The gate set's own failure, and the fix. Documented here rather than
     left in a side report because it changes what a GO in this report means."""
-    sizing = _load(SIZING_JSON)
-    if not sizing:
+    runs = []
+    for path in sorted((ROOT / "backtests/reports").glob(SIZING_GLOB)):
+        payload = _load(path)
+        if payload.get("arms"):
+            runs.append(payload)
+    if not runs:
         return
+    # The false positive that forced the change comes first; any later cell is
+    # a control on it.
+    runs.sort(key=lambda p: p.get("cell") != "auction_reclaim_5m")
+    sizing = runs[0]
     base = sizing.get("baseline") or {}
-    arms = sizing.get("arms") or []
-    if not arms:
-        return
-    arm = arms[0]
+    arm = (sizing.get("arms") or [])[0]
 
     pdf.h2("11. 閘門集合自己的失效，以及修法")
     pdf.body(
@@ -335,6 +340,20 @@ def _section_gate_tightening(pdf: "ReportPDF") -> None:
         "樣本內欄全部改善，樣本外欄一個都沒動：折通過率仍是 8 折過 1 折。"
         "縮小部位壓低的是期望值周圍的量測噪音，不會改變期望值的正負號。"
     )
+    for other in runs[1:]:
+        o_base = other.get("baseline") or {}
+        o_arm = (other.get("arms") or [])[0]
+        pdf.bullet(
+            f"對照組 {other.get('cell')} @ {o_arm.get('size_factor', 0):.2f}x："
+            f"壓力 PF {o_base.get('stress_profit_factor', 0):.3f} → "
+            f"{o_arm.get('stress_profit_factor', 0):.3f}，"
+            f"WFO 通過率 {o_base.get('wfo_pass_ratio', 0):.3f} → "
+            f"{o_arm.get('wfo_pass_ratio', 0):.3f}，"
+            f"MC p5 {o_base.get('mc_p5_sharpe', 0):+.2f} → "
+            f"{o_arm.get('mc_p5_sharpe', 0):+.2f}；"
+            f"舊制 {o_arm.get('decision')}、新制 "
+            f"{o_arm.get('decision_under_current_gates')}。"
+        )
     pdf.bullet(
         "舊制四道硬閘門裡，三道雖讀樣本外的折，但只測「活得下來」："
         "回撤只要在上限內、有成交只要大於零、彙總 PF 把八折併成一個池子讓少數幾筆大贏撐住。"
@@ -696,7 +715,7 @@ def build() -> Path:
         4.2,
         "本 PDF 由 scripts/render_entry_hypothesis_pdf.py 產生，頁面尺寸 ISO 216 A4（210 × 297 mm）。"
         "文字來源 backtests/reports/ 下的 entry_hypothesis_results_report.md、"
-        "entry_hypothesis_gate_report.json、slippage_decomposition.json 與 sizing_wfo.json。"
+        "entry_hypothesis_gate_report.json、slippage_decomposition.json 與 sizing_wfo_*.json。"
         "列印建議：100% 實際大小、不縮放、雙面可選。",
         align=Align.L,
     )

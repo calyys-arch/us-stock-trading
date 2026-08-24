@@ -68,12 +68,20 @@ from python.analytics.volume_route_policy import time_stop_for  # noqa: E402
 from python.backtest.intraday_engine import IntradayBacktestConfig  # noqa: E402
 
 GATE_REPORT = Path("backtests/reports/entry_hypothesis_gate_report.json")
-OUT_JSON = Path("backtests/reports/sizing_wfo.json")
-OUT_MD = Path("backtests/reports/sizing_wfo.md")
+REPORT_DIR = Path("backtests/reports")
+# One file per cell. A single fixed path would silently overwrite the previous
+# cell's hour of compute, and these arms are each other's controls: the whole
+# point is comparing how different cells respond to the same size reduction.
+OUT_STEM = "sizing_wfo"
+
+
+def _out_paths(cell: str) -> tuple[Path, Path]:
+    return (REPORT_DIR / f"{OUT_STEM}_{cell}.json",
+            REPORT_DIR / f"{OUT_STEM}_{cell}.md")
 
 # Mirrors scripts/run_intraday_backtest.assemble_intraday_gates. Kept as a
 # literal (rather than imported) so a stored arm can still be scored against
-# the gate set that produced it: the `arms` in an existing sizing_wfo.json
+# the gate set that produced it: the `arms` in an existing sizing_wfo_*.json
 # were run before WFO/MC were promoted to hard, and silently re-scoring them
 # under today's rule would misrepresent what the pipeline actually decided.
 HARD_GATES = (
@@ -302,9 +310,10 @@ def _render_md(payload: dict) -> str:
 
 
 def _persist(payload: dict) -> None:
-    OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
-    OUT_JSON.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-    OUT_MD.write_text(_render_md(payload), encoding="utf-8")
+    out_json, out_md = _out_paths(payload["cell"])
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    out_md.write_text(_render_md(payload), encoding="utf-8")
 
 
 def main() -> int:
@@ -325,14 +334,21 @@ def main() -> int:
     args = parser.parse_args()
 
     if args.rerender:
-        payload = json.loads(OUT_JSON.read_text(encoding="utf-8"))
-        _rescore(payload["baseline"])
-        for arm in payload.get("arms", []):
-            _rescore(arm)
-            arm["verdict"] = _verdict(payload["baseline"], arm)
-            print(f"  {arm['size_factor']:.2f}x: {arm['verdict']}", flush=True)
-        _persist(payload)
-        print(f"\nWrote {OUT_JSON}\nWrote {OUT_MD}")
+        # Rerender every cell that has a stored run, not just --cell: the
+        # verdict prose is shared, so a wording fix should reach all of them.
+        stored = sorted(REPORT_DIR.glob(f"{OUT_STEM}_*.json"))
+        if not stored:
+            raise SystemExit(f"no {OUT_STEM}_*.json under {REPORT_DIR}")
+        for path in stored:
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            _rescore(payload["baseline"])
+            for arm in payload.get("arms", []):
+                _rescore(arm)
+                arm["verdict"] = _verdict(payload["baseline"], arm)
+                print(f"  {payload['cell']} {arm['size_factor']:.2f}x: "
+                      f"{arm['verdict']}", flush=True)
+            _persist(payload)
+            print(f"Wrote {_out_paths(payload['cell'])[0]}", flush=True)
         return 0
 
     report = json.loads(GATE_REPORT.read_text(encoding="utf-8"))
@@ -396,7 +412,8 @@ def main() -> int:
         print(f"    => {arm['verdict']}", flush=True)
 
     _persist(payload)
-    print(f"\nWrote {OUT_JSON}\nWrote {OUT_MD}")
+    out_json, out_md = _out_paths(args.cell)
+    print(f"\nWrote {out_json}\nWrote {out_md}")
     return 0
 
 

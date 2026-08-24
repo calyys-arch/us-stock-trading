@@ -73,6 +73,7 @@ import pandas as pd
 sys.path.insert(0, str(Path(__file__).parent.parent))
 sys.path.insert(0, str(Path(__file__).parent))
 
+from python.analytics.execution_ceiling import ceiling_from_runs  # noqa: E402
 from python.analytics.volume_route_policy import time_stop_for  # noqa: E402
 from python.backtest.intraday_engine import (  # noqa: E402
     IntradayBacktestConfig,
@@ -300,47 +301,20 @@ def _fix_baseline_row(row: dict) -> None:
 
 
 def _ceiling(row: dict) -> dict | None:
-    """The edge-to-cost ratio a cell converges to as position size goes to zero.
+    """The edge-to-cost ratio this cell converges to as position size -> 0.
 
-    Shrinking size kills impact (quadratic) but leaves the spread-to-edge
-    relationship untouched (both linear in notional), so the sweep does not
-    trend toward infinity — it saturates at edge_bps / spread_bps. Expressing
-    both sides in basis points makes that limit computable from the 1.0x runs
-    alone, and turns "is this signal executable at all?" into one comparison:
-    a cell whose pre-cost edge per trade is thinner than the round-trip spread
-    can never clear PF 1.0 at ANY size, however perfect the execution.
-
-    Commission is excluded deliberately. It is a per-share floor, not a
-    proportional cost, so it worsens as size shrinks and would confound the
-    limit; the ceiling here is the optimistic bound.
-
-    The spread figure is MEASURED, not the 2x half_spread_bps nominal. It comes
-    out below nominal (both legs do charge it — see _close_position) because
-    the attribution is a difference between separately-run paths rather than an
-    identity over one path: switching a cost term off moves fill prices, which
-    moves which bars trigger stops. `split.additivity_gap` quantifies the
-    residual. The ceiling is therefore accurate to roughly the size of that
-    gap, which is immaterial here only because the cohorts separate by an
-    order of magnitude rather than by percent.
+    Thin wrapper over python.analytics.execution_ceiling so this script and
+    scripts/run_ceiling_prescreen.py cannot drift apart on the formula. See
+    that module for why the limit exists and what it excludes.
     """
     attribution = row.get("attribution") or {}
-    spread_run = attribution.get("spread_only") or {}
-    split = row.get("split") or {}
-    base = next((e for e in (row.get("size_sweep") or []) if e.get("factor") == 1.0), None)
-    if not base or not spread_run or base.get("edge_per_trade") is None:
+    if not attribution:
         return None
-    n_spread = spread_run.get("n_trades") or 0
-    notional = base.get("avg_notional") or spread_run.get("avg_notional")
-    spread_notional = spread_run.get("avg_notional") or notional
-    if not n_spread or not notional or not spread_notional or split.get("spread") is None:
-        return None
-    edge_bps = base["edge_per_trade"] / notional * 1e4
-    spread_bps = (float(split["spread"]) / n_spread) / spread_notional * 1e4
-    return {
-        "edge_bps": edge_bps,
-        "spread_round_trip_bps": spread_bps,
-        "ceiling": (edge_bps / spread_bps) if spread_bps else None,
-    }
+    return ceiling_from_runs(
+        baseline=attribution.get("baseline") or {},
+        spread_only=attribution.get("spread_only") or {},
+        zero=attribution.get("zero") or {},
+    )
 
 
 def _ceiling_verdict(limit: dict | None) -> str:
