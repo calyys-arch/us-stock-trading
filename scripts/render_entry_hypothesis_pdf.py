@@ -363,15 +363,136 @@ def _section_gate_tightening(pdf: "ReportPDF") -> None:
         "真正測「穩定」的 wfo_go 與 MC p5 當時都動不了決策——硬／軟的切分和資訊所在的位置是反的。"
         "升級後硬閘門六道，此變更只會讓 GO 變 NO-GO，不會反向。"
     )
+    gate_payload = _load(GATE_JSON)
+    n_cells = len(gate_payload.get("cells") or {})
+    n_rows = len(gate_payload.get("strategies") or [])
     pdf.bullet(
-        "本矩陣 16 格、112 個計分列的決策與閘門布林值完全未變："
+        f"本矩陣 {n_cells} 格、{n_rows} 個計分列的決策未因這次升級改變："
         "它們原本就沒過舊制的硬 AND。這是預防性修補，不是重新評分。"
+        "（唯一被改動閘門字母的是空折更正，見第 12 節，方向同樣只會讓 GO 變 NO-GO。）"
     )
     pdf.bullet(
         "同批發現的引擎錯誤：run_intraday_stress_test 逐欄搬運 engine config，"
         "把 sizing 與成本參數退回預設值，使第一次 0.75x 壓力測試實際跑在 1.00x 部位上、"
         "輸出位元級等於基準。已改為整份繼承並加上回歸測試。"
         "既有呼叫點只設定有被搬運的三個欄位，已發布數字均未受影響。"
+    )
+
+
+def _section_empty_folds(pdf: "ReportPDF") -> None:
+    """The empty-fold bug and the two gate letters it changed.
+
+    Driven off the `rescored_empty_folds` stamps in the gate JSON so this
+    section cannot drift from the table it is explaining.
+    """
+    cells = (_load(GATE_JSON).get("cells") or {})
+    rescored = sorted(
+        (k, v) for k, v in cells.items() if v.get("rescored_empty_folds")
+    )
+    if not rescored:
+        return
+
+    pdf.h2("12. 走步計分自己的失效：沒有成交的折被算成通過")
+    pdf.body(
+        "舊的走步邏輯把零成交的折判為 PASS。兩邊都沒有交易時 IS 與 OOS Sharpe 都是 0.0，"
+        "衰減檢定退化成 0.0 >= 0、絕對檢定退化成 0.0 >= 0.0，兩者都成立，"
+        "於是那一折被計入通過率。wfo_go 還是 warning 時無害；升為硬閘門之後會直接翻決策。"
+    )
+    pdf.table(
+        ["格子", "空折／總折", "可評估", "舊通過率", "新通過率", "舊 wfo_go", "新判決"],
+        [
+            [f"{k}", f"{v['rescored_empty_folds'].get('empty_folds')}/"
+             f"{v.get('wfo_folds') or 0}",
+             str(v.get("wfo_evaluable_folds")),
+             f"{float(v['rescored_empty_folds'].get('prior_pass_ratio') or 0):.0%}",
+             f"{float(v.get('wfo_pass_ratio') or 0):.0%}",
+             "PASS" if v["rescored_empty_folds"].get("prior_wfo_go") else "FAIL",
+             str(v.get("wfo_decision"))]
+            for k, v in rescored
+        ],
+        [1.5, 0.9, 0.7, 0.8, 0.8, 0.8, 1.1],
+    )
+    pdf.bullet(
+        "現行規則：空折排除在通過率之外，可評估折不足 60% 判 INCONCLUSIVE，"
+        "對呼叫端 fail-closed（所有呼叫點都測 decision == \"GO\"）。"
+        "每一折的 oos_pass 也改為必須真的成交才可能為真。"
+    )
+    pdf.bullet(
+        "更正只用原始逐折紀錄做算術，沒有重跑。空折只會把 wfo_go 從 FAIL 推成 PASS、"
+        "不會反向，所以其餘格子的閘門字母不受影響——"
+        "這也是為什麼只有原本 PASS 的格子需要逐折證據。"
+    )
+    n_go = sum(1 for v in cells.values() if (v.get("route_gates") or {}).get("wfo_go"))
+    pdf.bullet(
+        f"更正後，{len(cells)} 格裡通過 wfo_go 的有 {n_go} 格。"
+        "沒有任何一個進場假設產生過會外推的走步結果——這是整份報告最尖銳的單一事實。"
+    )
+    unchosen = [(k, v) for k, v in rescored if v.get("candidate_params_unchosen")]
+    for key, _ in unchosen:
+        pdf.bullet(
+            f"{key} 的其餘閘門不可信：最後一折是空的，所以 candidate_params 是空窗上 "
+            "Sharpe 0.0 的平手結果，沒有任何東西選出它，而全窗、壓力與 Monte Carlo "
+            "三項重播全部建立在它上面。第 3 節該格的錢閘門應讀作「尚未量測」。"
+        )
+    pdf.bullet(
+        "審計工具自己的失效也記在這裡：rescore_empty_folds.py 第一版跳過沒有逐折欄位的格子，"
+        "於是只檢查了 19 格裡的 2 格就印出「不需要重評」。缺證據的格子現在會被明確列為無法查核。"
+    )
+
+
+def _section_spread_tier(pdf: "ReportPDF") -> None:
+    """The spread-tier rescue and the holdout that refuted it."""
+    pdf.h2("13. 價差分層：開發視窗最接近的一格，以及推翻它的 holdout")
+    pdf.body(
+        "L2 depth 校準顯示全程使用的 2.0 bps 常數低估真實成本（價格調整後中位數 1.61 倍），"
+        "所以把宇宙限制到窄價差標的看起來是個真槓桿。在開發視窗上它確實有效。"
+    )
+    pdf.table(
+        ["vsa_no_demand_5m", "全 20 檔基準", "最便宜 8 檔"],
+        [
+            ["WFO 折通過率", "0.375", "0.625"],
+            ["OOS Sharpe 平均", "−0.333", "+0.557"],
+            ["成本後 PF", "0.801", "1.353"],
+            ["壓力 PF（1.5×）", "0.606", "1.256"],
+            ["MC p5 Sharpe", "−3.938", "−1.628"],
+            ["六道硬閘門", "過 2", "過 5"],
+        ],
+        [1.6, 1.2, 1.2],
+    )
+    pdf.bullet(
+        "六道過五，只剩 monte_carlo_p5_sharpe，是整個研究最接近的一格。"
+        "而且改善集中在樣本外欄，不是縮小部位那種只動樣本內成本算術的假陽性形狀。"
+    )
+    pdf.body(
+        "2026-07 holdout 推翻了它。開發視窗 end-exclusive 於 2026-07-01，"
+        "而 1m 快取已延伸到 2026-07-31，所以七月從未被任何折或格點搜尋讀過。"
+        "凍結參數與全 20 檔那次完全相同，因此這組對照只差標的池一個變數。"
+    )
+    pdf.table(
+        ["2026-07，同訊號同參數", "筆數", "毛 PF", "淨 PF", "淨損益"],
+        [
+            ["全 20 檔", "19", "1.067", "1.045", "+$261"],
+            ["最便宜 8 檔", "13", "0.516", "0.503", "−$1,722"],
+        ],
+        [1.8, 0.7, 0.8, 0.8, 1.0],
+    )
+    pdf.bullet(
+        "限制到便宜層讓七月變差，而且是在毛的層次變差——被砍掉的 6 筆正是有賺的那些，"
+        "八檔裡只有 AVGO 賺錢（4 筆 +$417），其餘七檔中六檔虧損。"
+    )
+    pdf.bullet(
+        "按價差挑最便宜的名字，實際上是在挑巨型科技股：那是規模／類股押注，"
+        "在開發視窗成立、在七月不成立。價差分層作為成本干預的說法不成立。"
+    )
+    pdf.bullet(
+        "同一份 holdout 也標出自己的極限：反方向那格（auction_reclaim_5m 配最貴 8 檔）"
+        "七月四門全過、PF 6.2，建立在 2 筆、單一標的 LITE 上。"
+        "21 個交易日在兩個方向都幾乎沒有檢定力，所以上表是「沒有佐證」，不是「已被否證」。"
+    )
+    pdf.bullet(
+        "附帶推翻的還有便宜的成本天花板預篩（三次嘗試：固定預設值、收緊進場濾網、"
+        "掃停損距離）。校準比值跨 18 倍、收緊濾網會摧毀總邊緣、筆數對停損距離幾乎不變。"
+        "預篩只能當可行性檢查與否證工具，不能當 WFO 結果的預測器。"
     )
 
 
@@ -426,11 +547,14 @@ def build() -> Path:
         "而 1m 訊號每筆稅前邊緣只有 $3–27。單閘門 PASS 不是上線，也不是 paper 開單依據。",
     )
 
+    gate_payload = _load(GATE_JSON)
+    pending = list(gate_payload.get("pending") or [])
     pdf.h2("0. 讀這份報告前先知道四件事")
     pdf.bullet(
-        "15×7 矩陣已大致跑完，仍有 9 格沒有 WFO（absorption_breakout 5m/15m、auction_reclaim 1m、"
-        "vsa_effort 1m/5m、vsa_no_demand 1m/15m、obv_divergence 1m/15m）。已完成的格子有些是新 WFO、"
-        "有些是從官方報告匯入，第 10 節列出被重跑取代的那幾格。"
+        f"15×7 矩陣已大致跑完，仍有 {len(pending)} 格沒有 WFO"
+        + (f"（{'、'.join(pending)}）" if pending else "")
+        + "。已完成的格子有些是新 WFO、有些是從官方報告匯入，"
+        "第 10 節列出被重跑取代的那幾格。"
     )
     pdf.bullet(
         "「沒有毛邊緣」這個退役理由對多數 1m 訊號是錯的。profit_factor_gross 是 pre-commission 而非 "
@@ -701,6 +825,8 @@ def build() -> Path:
     _section_decomposition(pdf)
     _section_superseded(pdf)
     _section_gate_tightening(pdf)
+    _section_empty_folds(pdf)
+    _section_spread_tier(pdf)
 
     pdf.ln(4)
     pdf.set_draw_color(0, 0, 0)

@@ -180,6 +180,62 @@ def _decomposition_section(decomp: dict[str, dict]) -> list[str]:
     return L
 
 
+def _rescored_section(cells: dict) -> list[str]:
+    """Cells whose `wfo_go` was corrected after the empty-fold rule landed.
+
+    Data-driven off the `rescored_empty_folds` / `candidate_params_unchosen`
+    stamps rather than written by hand, because a hand-added section is
+    destroyed by the next --render-only or by the pending cells finishing,
+    which is exactly when a reader most needs the caveat.
+    """
+    rows = sorted(
+        ((k, c["rescored_empty_folds"], c.get("candidate_params_unchosen"))
+         for k, c in cells.items() if c.get("rescored_empty_folds")),
+        key=lambda kv: kv[0],
+    )
+    if not rows:
+        return []
+    L = [
+        "## 空折更正：`wfo_go` 曾把沒有成交的折算成通過",
+        "",
+        "舊的走步邏輯會把零成交的折判為 PASS：兩邊都沒有交易時 IS 與 OOS Sharpe 都是 0.0，",
+        "衰減檢定退化成 `0.0 >= 0`、絕對檢定退化成 `0.0 >= 0.0`，兩個都成立。",
+        "在 `wfo_go` 還是 warning 的時候無害，升為硬閘門之後會直接翻決策。",
+        "現在空折被排除在通過率之外，可評估折不足 60% 時判 INCONCLUSIVE（對呼叫端 fail-closed）。",
+        "",
+        "以下格子在該規則之前跑完，`wfo_go` 已依原始逐折紀錄精確更正。",
+        "空折只會把 `wfo_go` 從 FAIL 推成 PASS、不會反向，所以其餘格子不受影響。",
+        "",
+        "| 格子 | 空折／總折 | 可評估 | 舊通過率 | 新通過率 | 舊 `wfo_go` | 新判決 |",
+        "|---|---|---:|---:|---:|---|---|",
+    ]
+    unchosen = []
+    for key, r, uc in rows:
+        cell = cells[key]
+        total = cell.get("wfo_folds") or 0
+        L.append(
+            f"| `{key}` | {r.get('empty_folds')}/{total} | "
+            f"{cell.get('wfo_evaluable_folds')} | "
+            f"{float(r.get('prior_pass_ratio') or 0):.0%} | "
+            f"{float(cell.get('wfo_pass_ratio') or 0):.0%} | "
+            f"{'PASS' if r.get('prior_wfo_go') else 'FAIL'} | "
+            f"{cell.get('wfo_decision')} |"
+        )
+        if uc:
+            unchosen.append((key, uc))
+    L.append("")
+    for key, uc in unchosen:
+        L.append(
+            f"**`{key}` 的其餘閘門不可信。** 它的最後一折是空的，所以 `candidate_params` "
+            "是空窗上 Sharpe 0.0 的平手結果——沒有任何東西選出那組參數，而全窗、壓力與 "
+            "Monte Carlo 三項重播全部建立在它上面。表中該格的 "
+            f"{'、'.join('`%s`' % g for g in (uc.get('affected_gates') or []))} "
+            "應讀作「尚未量測」，而非量測結果。解法是重跑該格。"
+        )
+        L.append("")
+    return L
+
+
 def _supersede_section(cells: dict) -> list[str]:
     """Cells whose imported numbers were replaced by a re-run, with the old values.
 
@@ -278,6 +334,7 @@ def _render(payload: dict) -> str:
     decomp = _decomposition_index()
     lines.extend(_decomposition_section(decomp))
     lines.extend(_supersede_section(cells))
+    lines.extend(_rescored_section(cells))
 
     for route in routes:
         lines.append(f"## `{route.name}`")
@@ -318,6 +375,52 @@ def _render(payload: dict) -> str:
             v15 = _verdict(strategies, route.name, 15, short) if 15 in planned else "N/A"
             lines.append(f"| `{full}` | {v1} | {v5} | {v15} |")
         lines.append("")
+
+    lines.extend([
+        "## 試過並被推翻的救援路徑",
+        "",
+        "記在這裡是為了不要有人再付第二次錢。每一項都是先有假說、再被自己的校準數字否證。",
+        "",
+        "**一、縮小部位。** `auction_reclaim_5m` 在 0.75x 部位下拿到 GO，但那是靠唯一樣本內的",
+        "壓力閘門翻票（8 折過 1 折、OOS Sharpe −6.95、MC p5 −2.22）。已由 `wfo_go` 與",
+        "`monte_carlo_p5_sharpe` 升為硬閘門堵住，詳見上方方法段。",
+        "",
+        "**二、便宜的成本天花板預篩**（`scripts/run_ceiling_prescreen.py`，三次嘗試全滅）。",
+        "想用免 WFO 的預篩先淘汰沒有成本空間的格子：",
+        "",
+        "- 用 `configs/strategy.yaml` 預設值當下界 —— 校準比值從 1.95x（auction_reclaim_5m）",
+        "  到 0.11x（vsa_no_demand_5m），跨 18 倍。排序活著，尺度死了。",
+        "- 收緊進場濾網，假設選擇性會把守恆的邊緣濃縮起來 —— auction_reclaim 的",
+        "  `min_rel_volume` 掃描直接反證：筆數 56→21→8→2，總邊緣 1363→867→−4→92 bps-trades。",
+        "  收緊會摧毀邊緣，不是重新分配它。",
+        "- 掃 `stop_atr_mult`，假設軸線是持有時間 —— 也被反證：筆數對停損距離幾乎不變",
+        "  （auction 在 0.15–0.90 之間全是 56 筆），停損只重分配固定交易集的損益，",
+        "  不改變機會有多少。",
+        "",
+        "結論：預篩只能當可行性檢查（給定參數能不能發訊號）與否證工具，不能當 WFO 結果的預測器。",
+        "",
+        "**三、價差分層。** L2 depth 校準顯示全程使用的 2.0 bps 常數低估真實成本",
+        "（價格調整後中位數 1.61 倍），所以把宇宙限制到窄價差標的看起來是個真槓桿。",
+        "在開發視窗上它確實有效：`vsa_no_demand_5m` 配最便宜 8 檔，六道硬閘門過五，",
+        "只剩 `monte_carlo_p5_sharpe`（通過率 0.375→0.625、OOS Sharpe 平均 −0.333→+0.557、",
+        "成本後 PF 0.801→1.353），是整個研究最接近的一格。",
+        "",
+        "2026-07 holdout 推翻了它。凍結參數與全 20 檔那次**完全相同**，所以只差標的池一個變數：",
+        "",
+        "| 2026-07，同訊號同參數 | 筆數 | 毛 PF | 淨 PF | 淨損益 |",
+        "|---|---:|---:|---:|---:|",
+        "| 全 20 檔 | 19 | 1.067 | 1.045 | +261 |",
+        "| 最便宜 8 檔 | 13 | 0.516 | 0.503 | −1,722 |",
+        "",
+        "限制到便宜層讓七月變差，而且是在**毛**的層次變差——被砍掉的 6 筆正是有賺的那些，",
+        "八檔裡只有 AVGO 賺錢。按價差挑最便宜的名字實際上是在挑巨型科技股，那是規模／類股押注，",
+        "在開發視窗成立、在七月不成立。它不是成本干預。細節見 `july_holdout_tier_report.md`。",
+        "",
+        "同一份 holdout 也提醒它自己的極限：反方向那格（`auction_reclaim_5m` 配最貴 8 檔）",
+        "在七月四門全過、PF 6.2，建立在 **2 筆**、單一標的上。21 個交易日在兩個方向都幾乎沒有檢定力，",
+        "所以上表是「沒有佐證」，不是「已被否證」。",
+        "",
+    ])
 
     go = sum(1 for s in strategies if s.get("decision") == "GO")
     lines.append("## 合計")
@@ -400,7 +503,27 @@ def main() -> int:
             "be reproduced by the current code"
         ),
     )
+    parser.add_argument(
+        "--render-only",
+        action="store_true",
+        help=(
+            "re-score and re-render from the stored JSON, running no backtest. "
+            "For when a cell's gates were corrected out of band (e.g. "
+            "scripts/rescore_empty_folds.py) and the md must follow"
+        ),
+    )
     args = parser.parse_args()
+
+    if args.render_only:
+        if not REPORT_JSON_PATH.exists():
+            print(f"missing {REPORT_JSON_PATH}")
+            return 1
+        payload = json.loads(REPORT_JSON_PATH.read_text(encoding="utf-8"))
+        payload["strategies"] = _score_cells(payload.get("cells") or {}, catalog)
+        _persist(payload)
+        print(f"Re-rendered {REPORT_PATH} from {REPORT_JSON_PATH} "
+              f"({len(payload.get('cells') or {})} cells, no backtest)")
+        return 0
 
     selected = list(routes) if args.hypothesis == "all" else [args.hypothesis]
     if args.chart == "all":
