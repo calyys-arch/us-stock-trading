@@ -54,10 +54,16 @@ TRADING_DAYS = 252
 MIN_ROWS = 2500
 
 
-def load_panel(min_rows: int = MIN_ROWS) -> pd.DataFrame:
-    """Wide close-price frame (index=date, columns=symbol) of full-span names."""
+def load_panel(min_rows: int = MIN_ROWS, directory: Path | None = None
+               ) -> pd.DataFrame:
+    """Wide close-price frame (index=date, columns=symbol) of full-span names.
+
+    `directory` defaults to data/history; pass another to score the same
+    machinery on a different dataset (e.g. data/history_gfc2008).
+    """
+    source = directory or HISTORY
     series = {}
-    for path in sorted(HISTORY.glob("*.csv")):
+    for path in sorted(source.glob("*.csv")):
         df = pd.read_csv(path)
         cols = {c.lower(): c for c in df.columns}
         if "date" not in cols or "close" not in cols:
@@ -71,7 +77,7 @@ def load_panel(min_rows: int = MIN_ROWS) -> pd.DataFrame:
         )
         series[path.stem] = s[~s.index.duplicated(keep="last")].sort_index()
     if not series:
-        raise SystemExit(f"no symbols in {HISTORY} with >= {min_rows} rows")
+        raise SystemExit(f"no symbols in {source} with >= {min_rows} rows")
     panel = pd.DataFrame(series).sort_index()
     return panel.dropna(how="all")
 

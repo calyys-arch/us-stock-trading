@@ -223,6 +223,96 @@ def apply_exposure_scaled(gross: pd.Series, exposure: pd.Series,
 
 HOLDOUT_START = "2024-01-01"
 
+GFC_DIR = ROOT / "data/history_gfc2008"
+# Anything that is not equity. An equal-weight basket including these has a
+# smaller 2008 drawdown because Treasuries RALLIED, which is diversification
+# doing the work rather than the sizing rule — so the equity-only arm exists
+# to remove that credit.
+GFC_NON_EQUITY = {
+    "AGG", "IEF", "LQD", "SHY", "TIP", "TLT",     # bonds
+    "GLD", "SLV", "DBC", "USO", "GDX",            # commodities
+}
+
+
+def gfc_stress_test(sims: int, target_vol: float) -> int:
+    """Run the FROZEN policy against 2008, out of regime and out of universe.
+
+    Nothing is fitted here. `target_vol` arrives already chosen on 2018-2023
+    US single names; this run only asks what it does to a different universe
+    in a different decade through a real bear market. That is the point: the
+    2024-2026 holdout passed the drawdown gate without ever being tested,
+    because the unscaled portfolio drew down only -18.6% there and no
+    exposure rule was required.
+
+    Two universes. All 57 ETFs is the honest full basket, but it contains
+    Treasuries that rallied through 2008, so a small drawdown there would be
+    partly asset-class diversification. Equity-only strips those out and is
+    the arm that actually has a crash to survive.
+
+    The constant-exposure control returns for the same reason as before: vol
+    targeting lowers average exposure, and less exposure cuts drawdown on its
+    own, so only a win against a FIXED exposure at the SAME average is
+    evidence that the timing did anything.
+    """
+    full = load_panel(min_rows=800, directory=GFC_DIR)
+    equity = full.drop(columns=[c for c in full.columns if c in GFC_NON_EQUITY])
+    print(f"GFC: {full.shape[1]} 檔 ETF，{len(full)} 個交易日 "
+          f"({full.index[0].date()} -> {full.index[-1].date()})")
+    print(f"     股票子集 {equity.shape[1]} 檔（剔除 "
+          f"{full.shape[1] - equity.shape[1]} 檔債券與商品）")
+    print(f"     凍結目標波動 = {target_vol:.0%}（來自 2018-2023 美股個股，此處不擬合）\n")
+
+    results = {}
+    for label, panel in (("全部 57 檔", full), ("只留股票", equity)):
+        gross = gross_returns(panel)
+        exp = exposure_path(gross, target_vol)
+        net = apply_exposure(gross, exp)
+        mean_exp = float(exp.reindex(net.index).mean())
+        base = gross.loc[net.index]
+        flat = pd.Series(mean_exp, index=net.index)
+        net_flat = apply_exposure(base, flat)
+
+        row = {
+            "n_symbols": int(panel.shape[1]),
+            "mean_exposure": mean_exp,
+            "unscaled": {"max_drawdown": _max_dd(base),
+                         "sharpe": _sharpe(base)},
+            "vol_target": {"max_drawdown": _max_dd(net),
+                           "sharpe": _sharpe(net),
+                           "profit_factor": _profit_factor(net),
+                           "mc_p5_sharpe": float(
+                               MonteCarloValidator(n_sims=sims, seed=42).run(
+                                   [float(v) for v in net.tolist()]).sharpe.p5)},
+            "constant_same_exposure": {"max_drawdown": _max_dd(net_flat),
+                                       "sharpe": _sharpe(net_flat)},
+        }
+        row["drawdown_gate_pass"] = row["vol_target"]["max_drawdown"] >= MAX_DD_LIMIT
+        row["timing_vs_constant_pts"] = (
+            row["vol_target"]["max_drawdown"]
+            - row["constant_same_exposure"]["max_drawdown"]) * 100
+        results[label] = row
+
+        print(f"== {label} ==  平均曝險 {mean_exp:.2f}")
+        print(f"   未縮放          回撤 {row['unscaled']['max_drawdown']:.1%}  "
+              f"Sharpe {row['unscaled']['sharpe']:.2f}")
+        print(f"   vol_target      回撤 {row['vol_target']['max_drawdown']:.1%}  "
+              f"Sharpe {row['vol_target']['sharpe']:.2f}  "
+              f"PF {row['vol_target']['profit_factor']:.2f}  "
+              f"MC p5 {row['vol_target']['mc_p5_sharpe']:+.2f}")
+        print(f"   constant(同曝險) 回撤 "
+              f"{row['constant_same_exposure']['max_drawdown']:.1%}  "
+              f"Sharpe {row['constant_same_exposure']['sharpe']:.2f}")
+        print(f"   → 回撤閘門 {'PASS' if row['drawdown_gate_pass'] else 'FAIL'}"
+              f"；動態相對固定 {row['timing_vs_constant_pts']:+.1f} 個百分點\n")
+
+    out = ROOT / "backtests/reports/vol_target_gfc_stress.json"
+    out.write_text(json.dumps(
+        {"frozen_target_vol": target_vol, "max_dd_limit": MAX_DD_LIMIT,
+         "note": "target frozen from 2018-2023 US single names; nothing fitted here",
+         "universes": results}, indent=2, default=str), encoding="utf-8")
+    print(f"Wrote {out}")
+    return 0
+
 
 def policy_holdout(sims: int) -> int:
     """Set the exposure target on a dev window, then test it untouched.
@@ -332,10 +422,14 @@ def main() -> int:
                     help="walk-forward the target vol and score all 7 gates")
     ap.add_argument("--policy-holdout", action="store_true",
                     help="set the target on a dev window, test it on a holdout")
+    ap.add_argument("--gfc", type=float, metavar="TARGET_VOL",
+                    help="stress the frozen target against 2006-2010 ETFs")
     args = ap.parse_args()
 
     if args.policy_holdout:
         return policy_holdout(args.sims)
+    if args.gfc is not None:
+        return gfc_stress_test(args.sims, args.gfc)
 
     panel = load_panel(min_rows=250)
     panel = panel.loc[panel.index >= pd.Timestamp(WINDOW_START)]
