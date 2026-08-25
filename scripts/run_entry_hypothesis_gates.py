@@ -180,6 +180,68 @@ def _decomposition_section(decomp: dict[str, dict]) -> list[str]:
     return L
 
 
+# Pending cells retired on the cost arithmetic instead of a WFO, with the
+# evidence and — separately — how strong that evidence actually is. These are
+# PREDICTIONS. They deliberately do not get gate vectors or decisions written
+# into `cells`, because an inference and a measurement must not end up looking
+# alike in the same table.
+CLOSED_ON_ARITHMETIC = {
+    "vsa_no_demand_1m": (
+        "強",
+        "直接量測過：同一訊號在逐圖比較裡 5m PF 0.729（353 筆）→ "
+        "1m PF 0.445（1,691 筆）。成交量增為 4.79 倍而 PF 反而下滑。",
+    ),
+    "obv_divergence_1m": (
+        "強",
+        "直接量測過：5m PF 0.397（1,886 筆）→ 1m PF 0.166（10,633 筆、"
+        "淨 −$1,918,961）。這是全矩陣最差的單一路徑。",
+    ),
+    "vsa_effort_1m": (
+        "弱",
+        "沒有任何 1m 量測。結案依據只有間接證據：六個已量測的 1m 格子邊緣／成本"
+        "全部落在 −0.05x 到 0.11x，且該訊號 15m 的壓力閘門已不過。"
+        "但那六格都是 1m 原生訊號，和可重採樣家族是不同族群 —— "
+        "若 vsa_effort_5m 顯示出成本餘裕，這格應該重開。",
+    ),
+}
+
+
+def _closed_section(payload: dict) -> list[str]:
+    """Pending cells retired on arithmetic, kept visibly apart from measurements.
+
+    The matrix's value is that every PASS/FAIL in it was measured. Writing a
+    predicted NO-GO into a cell would spend that credibility to save compute,
+    so predictions live here, labelled, and the cells stay empty.
+    """
+    pending = list(payload.get("pending") or [])
+    closed = [(k, *CLOSED_ON_ARITHMETIC[k]) for k in pending if k in CLOSED_ON_ARITHMETIC]
+    still_queued = [k for k in pending if k not in CLOSED_ON_ARITHMETIC]
+    if not closed:
+        return []
+    L = [
+        "## 以成本算術結案、未實測的格子",
+        "",
+        "每筆執行成本幾乎不隨決策圖週期變化（已量測九格全部落在 $154–270），",
+        "而每筆邊緣相差百倍（$2.8 到 $295）。所以邊緣／成本比完全由「這個訊號每筆抓多大的移動」決定，",
+        "而六個已量測的 1m 格子全部落在 −0.05x 到 0.11x —— 那是 10 到 100 倍的缺口，",
+        "沒有任何執行改善能補。以下格子據此結案，**沒有實際跑 WFO**。",
+        "",
+        "這些是**預測，不是量測**。它們刻意不寫進上面的閘門表，也沒有 decision：",
+        "這份矩陣的價值在於裡面每一個 PASS／FAIL 都是量測出來的，",
+        "拿那個可信度去換運算時間並不划算。要量測就跑 `--hypothesis X --chart 1 --resume`。",
+        "",
+        "| 格子 | 依據強度 | 依據 |",
+        "|---|---|---|",
+    ]
+    for key, strength, why in closed:
+        L.append(f"| `{key}` | {strength} | {why} |")
+    L.append("")
+    if still_queued:
+        L.append(f"**仍在排隊實測：** {', '.join(f'`{k}`' for k in still_queued)}")
+        L.append("")
+    return L
+
+
 def _rescored_section(cells: dict) -> list[str]:
     """Cells whose `wfo_go` was corrected after the empty-fold rule landed.
 
@@ -328,13 +390,21 @@ def _render(payload: dict) -> str:
     ]
     pending = payload.get("pending") or []
     if pending:
-        lines.append(f"**尚未跑完的 WFO 格子：** {', '.join(pending)}")
-        lines.append("")
+        queued = [k for k in pending if k not in CLOSED_ON_ARITHMETIC]
+        closed = [k for k in pending if k in CLOSED_ON_ARITHMETIC]
+        if queued:
+            lines.append(f"**尚未跑完的 WFO 格子：** {', '.join(queued)}")
+            lines.append("")
+        if closed:
+            lines.append(f"**已以成本算術結案、不會實測：** {', '.join(closed)}"
+                         "（依據與強度見下方專節；這些是預測，不是量測）")
+            lines.append("")
 
     decomp = _decomposition_index()
     lines.extend(_decomposition_section(decomp))
     lines.extend(_supersede_section(cells))
     lines.extend(_rescored_section(cells))
+    lines.extend(_closed_section(payload))
 
     for route in routes:
         lines.append(f"## `{route.name}`")
