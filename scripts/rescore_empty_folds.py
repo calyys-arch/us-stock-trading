@@ -24,6 +24,26 @@ because their downstream evidence describes a parameter set nothing chose.
 Fixing those honestly means re-running, so this script names them instead of
 papering over them.
 
+Detection must not fail silently. Only cells run AFTER the per-fold detail was
+added to run_intraday_backtest.py carry `fold_oos_trades`, and the first
+version of this script `continue`d past cells without it — so it audited 2 of
+19 cells and printed "nothing to rescore", which is the one output an audit
+tool must never produce when it has not actually looked. Cells with no usable
+per-fold basis are now reported as UNVERIFIABLE.
+
+For those, `fold_oos_sharpes` is accepted as a fallback basis: an OOS Sharpe of
+exactly 0.0 is the empty-fold signature (the degenerate value the old rule
+scored as a pass), and a fold that really traded returning exactly 0.0 to full
+float precision does not happen. Where even that is missing, the bug's
+DIRECTION bounds the exposure: counting empty folds as passes can only inflate
+`wfo_go`, never deflate it, so a cell already at `wfo_go: FAIL` is unaffected
+whatever its folds did. Only PASS cells need per-fold evidence.
+
+LOG_DERIVED_FOLDS backfills the two pre-fix PASS cells from their run logs,
+with line references, because the terminal logs are ephemeral and outside the
+repo: transcribing the numbers into version control is what makes the
+correction reproducible instead of asserted.
+
 Usage:
     .venv/bin/python scripts/rescore_empty_folds.py            # report only
     .venv/bin/python scripts/rescore_empty_folds.py --write    # apply
@@ -42,6 +62,52 @@ from python.backtest.walk_forward import WFOConfig  # noqa: E402
 
 REPORT_JSON = ROOT / "backtests/reports/entry_hypothesis_gate_report.json"
 
+# Per-fold OOS Sharpe and the OLD rule's pass flag, transcribed from the run
+# logs of the two cells that finished before run_intraday_backtest.py started
+# recording per-fold detail. These are the only two cells whose stored
+# `wfo_go` is PASS, so they are the only two where the empty-fold bug can have
+# changed a gate letter.
+LOG_DERIVED_FOLDS = {
+    "auction_reclaim_15m": {
+        "source": "terminals/120074.txt lines 57-78 (run 2026-08-20 14:02-14:34)",
+        "oos_sharpes": [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "is_sharpes": [7.621, 2.755, 3.406, 0.0, 0.0, 0.0, 0.0, 0.0],
+        "old_pass": [False, False, False, True, True, True, True, True],
+    },
+    "absorption_breakout_15m": {
+        "source": "terminals/120085.txt lines 26-36",
+        "oos_sharpes": [0.0, 0.0, 0.0, 0.0, -10.215, -13.886, 0.0, 1.213],
+        "is_sharpes": [3.452, 0.0, 0.0, 0.0, 4.653, -1.559, -1.836, -3.037],
+        "old_pass": [False, True, True, True, False, False, True, True],
+    },
+}
+
+
+def _empty_basis(cell: dict, key: str) -> tuple[list[bool] | None, list[bool] | None, str]:
+    """Per-fold (is_empty, old_pass) flags and the basis they came from.
+
+    Returns (None, None, reason) when the cell carries no usable per-fold
+    evidence, so the caller can report it rather than assume it is clean.
+    """
+    trades = cell.get("fold_oos_trades")
+    passes = cell.get("fold_oos_pass")
+    if isinstance(trades, list) and trades:
+        empty = [not t for t in trades]
+        return empty, (passes if isinstance(passes, list) else None), "fold_oos_trades"
+
+    sharpes = cell.get("fold_oos_sharpes")
+    backfill = LOG_DERIVED_FOLDS.get(key)
+    basis = "fold_oos_sharpes"
+    if not (isinstance(sharpes, list) and sharpes) and backfill:
+        sharpes = backfill["oos_sharpes"]
+        passes = backfill["old_pass"]
+        basis = f"log-derived ({backfill['source']})"
+    if isinstance(sharpes, list) and sharpes:
+        # Exactly 0.0 is the degenerate value an untraded fold reports.
+        empty = [float(s) == 0.0 for s in sharpes]
+        return empty, (passes if isinstance(passes, list) else None), basis
+    return None, None, "no per-fold detail stored"
+
 
 def audit(payload: dict) -> list[dict]:
     """Find cells whose pass ratio counted folds that never traded.
@@ -55,33 +121,50 @@ def audit(payload: dict) -> list[dict]:
     are not stored per fold. So a lower and an upper bound are reported, and a
     gate flip is only claimed when both bounds agree.
     """
-    findings = []
+    findings, unverifiable = [], []
+    min_evaluable = WFOConfig().min_evaluable_folds_ratio
+    min_pass = WFOConfig().min_pass_folds_ratio
+
     for key, cell in sorted((payload.get("cells") or {}).items()):
-        trades = cell.get("fold_oos_trades")
-        if not isinstance(trades, list) or not trades:
-            continue
-        n_empty = sum(1 for t in trades if not t)
-        if not n_empty:
-            continue
-        total = len(trades)
-        old_passing = int(cell.get("wfo_passing_folds") or 0)
-        evaluable = total - n_empty
-        # Every empty fold might have been an automatic pass (lower bound on
-        # the new numerator) or none of them were (upper bound).
-        lo = max(old_passing - n_empty, 0) / evaluable if evaluable else 0.0
-        hi = min(old_passing, evaluable) / evaluable if evaluable else 0.0
-        min_evaluable = WFOConfig().min_evaluable_folds_ratio
-        min_pass = WFOConfig().min_pass_folds_ratio
-        inconclusive = (evaluable / total) < min_evaluable
         stored_go = bool((cell.get("route_gates") or {}).get("wfo_go"))
+        empty, old_pass, basis = _empty_basis(cell, key)
+        if empty is None:
+            # The bug only ever turned a fail into a pass, so a stored FAIL is
+            # already the fail-closed answer and needs no fold evidence.
+            unverifiable.append({
+                "cell": key, "stored_wfo_go": stored_go, "reason": basis,
+                "gate_at_risk": stored_go,
+            })
+            continue
+        if not any(empty):
+            continue
+
+        total = len(empty)
+        n_empty = sum(empty)
+        evaluable = total - n_empty
+        stored_ratio = float(cell.get("wfo_pass_ratio") or 0.0)
+
+        if old_pass and len(old_pass) == total:
+            # Exact: the fix only reclassifies empty folds, so a traded fold
+            # keeps its old verdict and the new ratio is directly countable.
+            kept = sum(1 for e, p in zip(empty, old_pass) if not e and p)
+            lo = hi = (kept / evaluable) if evaluable else 0.0
+        else:
+            old_passing = int(cell.get("wfo_passing_folds")
+                              or round(stored_ratio * total))
+            lo = max(old_passing - n_empty, 0) / evaluable if evaluable else 0.0
+            hi = min(old_passing, evaluable) / evaluable if evaluable else 0.0
+
+        inconclusive = (evaluable / total) < min_evaluable
         new_go_lo = (not inconclusive) and lo >= min_pass
         new_go_hi = (not inconclusive) and hi >= min_pass
         findings.append({
             "cell": key,
+            "basis": basis,
             "total_folds": total,
             "empty_folds": n_empty,
             "evaluable_folds": evaluable,
-            "stored_pass_ratio": float(cell.get("wfo_pass_ratio") or 0.0),
+            "stored_pass_ratio": stored_ratio,
             "stored_wfo_go": stored_go,
             "new_decision": "INCONCLUSIVE" if inconclusive else (
                 "GO" if new_go_lo and new_go_hi else
@@ -94,9 +177,9 @@ def audit(payload: dict) -> list[dict]:
             # full-window, stress and Monte Carlo replays. If it was empty
             # those params were a tie at Sharpe 0.0 on an empty window, and
             # nothing downstream can be salvaged by re-reading the file.
-            "candidate_params_from_empty_fold": not trades[-1],
+            "candidate_params_from_empty_fold": bool(empty[-1]),
         })
-    return findings
+    return findings, unverifiable
 
 
 def main() -> int:
@@ -109,31 +192,43 @@ def main() -> int:
         print(f"missing {REPORT_JSON}")
         return 1
     payload = json.loads(REPORT_JSON.read_text(encoding="utf-8"))
-    findings = audit(payload)
+    findings, unverifiable = audit(payload)
+
+    if unverifiable:
+        at_risk = [u for u in unverifiable if u["gate_at_risk"]]
+        print(f"{len(unverifiable)} 格沒有逐折明細，無法直接查核："
+              f"{'、'.join(u['cell'] for u in unverifiable)}")
+        print("  空折只會把 wfo_go 從 FAIL 推成 PASS，不會反向，"
+              f"所以其中已是 FAIL 的 {len(unverifiable) - len(at_risk)} 格不受影響。")
+        if at_risk:
+            print("  !! 以下格子 wfo_go=PASS 且無逐折證據，閘門字母有風險：")
+            for u in at_risk:
+                print(f"       {u['cell']}（{u['reason']}）")
+        print()
 
     if not findings:
-        print("沒有任何格子含零成交的折，不需要重評。")
+        print("沒有任何可查核的格子含零成交的折。")
         return 0
 
     print(f"{len(findings)} 格含零成交的折：\n")
-    needs_rerun = []
+    unchosen = []
     for f in findings:
         ratio = (f"{f['new_pass_ratio_lo']:.0%}" if f["exact"]
                  else f"{f['new_pass_ratio_lo']:.0%}~{f['new_pass_ratio_hi']:.0%}")
         flag = "  <- 翻閘門" if f["flips_gate"] else ""
-        print(f"  {f['cell']}")
+        print(f"  {f['cell']}  [{f['basis']}]")
         print(f"    空折 {f['empty_folds']}/{f['total_folds']}（可評估 {f['evaluable_folds']}）；"
               f"通過率 {f['stored_pass_ratio']:.0%} -> {ratio}；"
               f"wfo_go {f['stored_wfo_go']} -> {f['new_decision']}{flag}")
         if f["candidate_params_from_empty_fold"]:
-            needs_rerun.append(f["cell"])
+            unchosen.append(f["cell"])
             print("    !! 最後一折是空的：candidate_params 是空窗上的平手結果，"
-                  "全窗／壓力／MC 都建立在沒有被真正選出的參數上，必須重跑")
+                  "全窗／壓力／MC 都建立在沒有被真正選出的參數上")
     print()
 
-    if needs_rerun:
-        print("以下格子無法只靠重讀檔案修正，需要重跑：")
-        for c in needs_rerun:
+    if unchosen:
+        print("以下格子的 wfo_go 可以精確更正，但其餘硬閘門要重跑才可信：")
+        for c in unchosen:
             print(f"  {c}")
         print()
 
@@ -144,7 +239,7 @@ def main() -> int:
     cells = payload["cells"]
     written = 0
     for f in findings:
-        if f["candidate_params_from_empty_fold"] or f["new_decision"] == "AMBIGUOUS":
+        if f["new_decision"] == "AMBIGUOUS":
             # Refuse to write a number this script cannot establish. Writing a
             # bound as if it were a measurement is the failure mode the whole
             # exercise exists to avoid.
@@ -153,20 +248,40 @@ def main() -> int:
         cell["wfo_pass_ratio"] = f["new_pass_ratio_hi"]
         cell["wfo_decision"] = f["new_decision"]
         cell["wfo_evaluable_folds"] = f["evaluable_folds"]
-        gates = cell.get("route_gates") or {}
-        if "wfo_go" in gates:
-            gates["wfo_go"] = f["new_decision"] == "GO"
+        for container in ("route_gates", "gates"):
+            gates = cell.get(container) or {}
+            if "wfo_go" in gates:
+                gates["wfo_go"] = f["new_decision"] == "GO"
         cell["rescored_empty_folds"] = {
             "reason": (
                 "folds with zero fills were previously scored as passes; "
                 "excluded from the pass ratio per walk_forward.FoldResult."
                 "is_evaluable"
             ),
+            "basis": f["basis"],
             "prior_pass_ratio": f["stored_pass_ratio"],
             "prior_wfo_go": f["stored_wfo_go"],
             "empty_folds": f["empty_folds"],
             "pass_ratio_was_reconstructed": not f["exact"],
         }
+        if f["candidate_params_from_empty_fold"]:
+            # wfo_go above is exact. Everything downstream is not: it describes
+            # a parameter set that a tie at Sharpe 0.0 on an empty in-sample
+            # window handed over, so mark it rather than let it read as measured.
+            cell["candidate_params_unchosen"] = {
+                "reason": (
+                    "the last fold was empty, so candidate_params came from a "
+                    "0.0-Sharpe tie on an empty in-sample window; the "
+                    "full-window, stress and Monte Carlo gates below describe "
+                    "parameters nothing selected"
+                ),
+                "affected_gates": [
+                    "cost_adjusted_profit_factor", "monte_carlo_p5_sharpe",
+                    "stress_slippage_1.5x_pf_ge_1", "oos_drawdown_within_limit",
+                    "has_oos_trades",
+                ],
+                "resolution": "re-run this cell under the fixed engine",
+            }
         written += 1
     if not written:
         print("沒有可以安全寫回的格子。")
