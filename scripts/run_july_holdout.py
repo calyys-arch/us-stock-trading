@@ -40,6 +40,14 @@ Monte Carlo is reported as `insufficient` rather than as a number when the
 path has fewer than MIN_MC_OBSERVATIONS trading days with activity: a p5
 Sharpe bootstrapped from a handful of daily returns is noise wearing a
 decimal point, and 21 sessions cannot supply more.
+
+`--source tier` reads backtests/reports/spread_tier_wfo.json instead, whose
+cells were optimized on the SAME dev window and are therefore holdout-clean
+against 2026-07 by the same argument. Each tier cell carries its own symbol
+subset, so the replay universe is restricted to it: a cell tuned on 8
+tight-spread names must be judged on those 8 names, not on the full top-20.
+Its output goes to *_tier.json/.md so a tier read can never be mistaken for
+the full-universe read.
 """
 from __future__ import annotations
 
@@ -67,11 +75,14 @@ from python.backtest.optimize import (  # noqa: E402
 )
 
 GATE_REPORT = Path("backtests/reports/entry_hypothesis_gate_report.json")
+TIER_REPORT = Path("backtests/reports/spread_tier_wfo.json")
 SPREADS_JSON = Path("backtests/reports/calibrated_spreads.json")
 GOAL_PATH = Path("configs/goal.yaml")
 STRATEGY_PATH = Path("configs/strategy.yaml")
 OUT_JSON = Path("backtests/reports/july_holdout_report.json")
 OUT_MD = Path("backtests/reports/july_holdout_report.md")
+OUT_JSON_TIER = Path("backtests/reports/july_holdout_tier_report.json")
+OUT_MD_TIER = Path("backtests/reports/july_holdout_tier_report.md")
 
 HOLDOUT_START = "2026-07-01"
 HOLDOUT_END = "2026-08-01"
@@ -112,6 +123,54 @@ def _calibrated_spreads() -> dict[str, float]:
         if median is not None:
             out[symbol] = float(median)
     return out
+
+
+def _collect_cells(source: str, requested: list[str]) -> tuple[list[tuple], str]:
+    """Resolve `requested` names into (key, cell, symbols) plus the dev window.
+
+    Both sources are normalized to the gate report's cell shape (`signal`,
+    `chart_minutes`, `candidate_params`) so `_replay` stays source-agnostic.
+    `symbols` is None for gate cells (full universe) and the tier's own
+    subset otherwise — a cell tuned on a restricted universe is only
+    interpretable when replayed on that same universe.
+    """
+    if source == "gate":
+        report = json.loads(GATE_REPORT.read_text(encoding="utf-8"))
+        window = report.get("window") or {}
+        dev_end = window.get("end")
+        cells = report.get("cells") or {}
+        out = [(k, cells[k], None) for k in requested if k in cells]
+        missing = [k for k in requested if k not in cells]
+        dev_window = f"{window.get('start')} .. {dev_end}"
+    else:
+        report = json.loads(TIER_REPORT.read_text(encoding="utf-8"))
+        dev_window = str(report.get("window") or "")
+        # "2025-08-01 .. 2026-07-01 (end-exclusive)" -> the end date
+        dev_end = dev_window.split("..")[-1].split("(")[0].strip() or None
+        by_key = {}
+        for row in report.get("results") or []:
+            res = row.get("result") or {}
+            key = f"{row['cell']}@{row['tier']}"
+            by_key[key] = (
+                {
+                    "signal": res.get("signal"),
+                    "chart_minutes": res.get("chart_minutes"),
+                    "candidate_params": res.get("candidate_params"),
+                },
+                list(row.get("symbols") or []),
+            )
+        requested = requested or list(by_key)
+        out = [(k, *by_key[k]) for k in requested if k in by_key]
+        missing = [k for k in requested if k not in by_key]
+
+    for key in missing:
+        print(f"  !! {key}: not in {source} report — skipped", flush=True)
+    if dev_end != DEV_END:
+        raise SystemExit(
+            f"refusing to run: {source} report dev window ends {dev_end!r}, "
+            f"expected {DEV_END!r} — the holdout boundary assumption no longer holds"
+        )
+    return out, dev_window
 
 
 def _top_day_concentration(daily_returns, top: int = 5) -> dict:
@@ -287,6 +346,7 @@ def _render_md(payload: dict) -> str:
     lines.append(f"- 產生時間：{payload['generated_at']}")
     lines.append(f"- Holdout 視窗：**{payload['holdout_window']}**（{payload['n_sessions']} 個交易日，end-exclusive）")
     lines.append(f"- 開發視窗（所有 WFO 用的）：{payload['dev_window']}")
+    lines.append(f"- 凍結參數來源：`{payload.get('param_source', 'gate')}`")
     lines.append(f"- 資料：{payload['data_label']}")
     lines.append(f"- 壓力倍數：{payload['stress_multiplier']:g}×；PF 地板 {payload['min_survival_pf']:g}；壓力 PF 地板 {payload['min_stress_pf']:g}")
     lines.append("")
@@ -315,6 +375,8 @@ def _render_md(payload: dict) -> str:
         lines.append(f"## `{row['cell']}` — {row['cost_model']}")
         lines.append("")
         lines.append(f"- 凍結參數：`{json.dumps(row['frozen_params'], sort_keys=True)}`")
+        if row.get("symbols"):
+            lines.append(f"- universe（{len(row['symbols'])} 檔）：{', '.join(row['symbols'])}")
         lines.append(f"- 訊號發出 / 成交：{m.get('signals_emitted')} / {m.get('signals_filled')}")
         lines.append(f"- 毛損益 {_fmt(m.get('gross_pnl'), ',.0f')}；成本 {_fmt(m.get('total_costs'), ',.0f')}；"
                      f"淨 {_fmt(m.get('total_net_pnl'), ',.0f')}")
@@ -347,18 +409,30 @@ def _render_md(payload: dict) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--cells", default=",".join(DEFAULT_CELLS))
+    parser.add_argument("--cells", default="")
     parser.add_argument("--start", default=HOLDOUT_START)
     parser.add_argument("--end", default=HOLDOUT_END)
+    parser.add_argument(
+        "--source",
+        choices=("gate", "tier"),
+        default="gate",
+        help="read frozen params from the gate report (full universe) or the "
+             "spread-tier WFO report (per-cell symbol subset)",
+    )
     parser.add_argument(
         "--rerender",
         action="store_true",
         help="rebuild the markdown from the existing JSON (no backtests)",
     )
     args = parser.parse_args()
+    out_json = OUT_JSON_TIER if args.source == "tier" else OUT_JSON
+    out_md = OUT_MD_TIER if args.source == "tier" else OUT_MD
+    requested = [c.strip() for c in args.cells.split(",") if c.strip()]
+    if not requested and args.source == "gate":
+        requested = list(DEFAULT_CELLS)
 
     if args.rerender:
-        payload = json.loads(OUT_JSON.read_text(encoding="utf-8"))
+        payload = json.loads(out_json.read_text(encoding="utf-8"))
         for row in payload.get("results") or []:
             conc = row.get("concentration") or {}
             top_sum, net_sum = conc.get("top_sum"), conc.get("net_sum")
@@ -367,9 +441,9 @@ def main() -> int:
             negligible = bool(top_sum) and abs(net_sum) < 0.1 * abs(top_sum)
             conc["net_is_negligible"] = negligible
             conc["top_share_of_net"] = None if (negligible or not net_sum) else top_sum / net_sum
-        OUT_JSON.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-        OUT_MD.write_text(_render_md(payload), encoding="utf-8")
-        print(f"Re-rendered {OUT_MD} from {OUT_JSON}")
+        out_json.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+        out_md.write_text(_render_md(payload), encoding="utf-8")
+        print(f"Re-rendered {out_md} from {out_json}")
         return 0
 
     if pd.Timestamp(args.start) < pd.Timestamp(DEV_END):
@@ -378,14 +452,9 @@ def main() -> int:
             "that would not be a holdout"
         )
 
-    report = json.loads(GATE_REPORT.read_text(encoding="utf-8"))
-    dev_window = report.get("window") or {}
-    if dev_window.get("end") != DEV_END:
-        raise SystemExit(
-            f"refusing to run: gate report dev window ends {dev_window.get('end')!r}, "
-            f"expected {DEV_END!r} — the holdout boundary assumption no longer holds"
-        )
-    cells = report.get("cells") or {}
+    selected, dev_window = _collect_cells(args.source, requested)
+    if not selected:
+        raise SystemExit(f"no replayable cells from the {args.source} report")
 
     goal = _load_yaml(GOAL_PATH).get("intraday", {})
     stress_mult = float(goal.get("stress_slippage_multiplier", 1.5))
@@ -414,6 +483,8 @@ def main() -> int:
     })
     data_label = (f"fixed top-{universe_cfg['top_n']} universe "
                   f"(computed_at={universe_cfg['computed_at']}), 1m bars via data/history_1m/")
+    if args.source == "tier":
+        data_label += "; each cell restricted to its spread-tier subset"
 
     print(f"holdout [{start_ts.date()}, {end_ts.date()}) — {len(sessions)} sessions, "
           f"{len(bars_by_symbol)} symbols", flush=True)
@@ -427,21 +498,27 @@ def main() -> int:
           f"(flat baseline 2.0 bps)", flush=True)
 
     results = []
-    for cell_key in [c.strip() for c in args.cells.split(",") if c.strip()]:
-        cell = cells.get(cell_key)
-        if not cell:
-            print(f"  !! {cell_key}: not in gate report — skipped", flush=True)
-            continue
+    for cell_key, cell, cell_symbols in selected:
         if not cell.get("candidate_params"):
             print(f"  !! {cell_key}: no frozen params — skipped", flush=True)
             continue
+        if cell_symbols:
+            cell_bars = {s: b for s, b in bars_by_symbol.items() if s in cell_symbols}
+            absent = [s for s in cell_symbols if s not in cell_bars]
+            if absent:
+                print(f"  !! {cell_key}: no July bars for {', '.join(absent)}", flush=True)
+            if not cell_bars:
+                continue
+        else:
+            cell_bars = bars_by_symbol
         for cost_label, spreads in cost_models:
-            print(f"\n=== {cell_key} | {cost_label} ===", flush=True)
+            print(f"\n=== {cell_key} | {cost_label} | {len(cell_bars)} symbols ===", flush=True)
             row = _replay(
-                cell_key, cell, bars_by_symbol, start_ts, end_ts,
+                cell_key, cell, cell_bars, start_ts, end_ts,
                 stress_mult, min_survival_pf, min_stress_pf, max_dd,
                 spreads, cost_label,
             )
+            row["symbols"] = sorted(cell_bars)
             m = row["metrics"]
             print(f"    trades={int(m.get('n_trades') or 0)} "
                   f"gross_pf={_fmt(m.get('profit_factor_gross'))} "
@@ -456,7 +533,8 @@ def main() -> int:
     payload = {
         "generated_at": pd.Timestamp.now("UTC").isoformat(),
         "holdout_window": f"{start_ts.date()} .. {end_ts.date()}",
-        "dev_window": f"{dev_window.get('start')} .. {dev_window.get('end')}",
+        "dev_window": dev_window,
+        "param_source": args.source,
         "n_sessions": len(sessions),
         "data_label": data_label,
         "stress_multiplier": stress_mult,
@@ -470,10 +548,10 @@ def main() -> int:
         ),
         "results": results,
     }
-    OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
-    OUT_JSON.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
-    OUT_MD.write_text(_render_md(payload), encoding="utf-8")
-    print(f"\nWrote {OUT_JSON}\nWrote {OUT_MD}")
+    out_json.parent.mkdir(parents=True, exist_ok=True)
+    out_json.write_text(json.dumps(payload, indent=2, default=str), encoding="utf-8")
+    out_md.write_text(_render_md(payload), encoding="utf-8")
+    print(f"\nWrote {out_json}\nWrote {out_md}")
     return 0
 
 
