@@ -221,12 +221,121 @@ def apply_exposure_scaled(gross: pd.Series, exposure: pd.Series,
     return (exp * gross - cost).dropna()
 
 
+HOLDOUT_START = "2024-01-01"
+
+
+def policy_holdout(sims: int) -> int:
+    """Set the exposure target on a dev window, then test it untouched.
+
+    Walk-forward could not enforce the drawdown limit, because in-sample
+    drawdown does not predict out-of-sample drawdown. The alternative is to
+    stop FITTING the target at all and set it from risk policy: pick the
+    largest target whose drawdown respects the limit on a development window,
+    freeze it, and see what it does on data that had no part in choosing it.
+
+    "Largest that respects the limit" is the deliberate rule — de-risking
+    further would buy nothing against a hard limit while giving up return.
+
+    The circularity this avoids is the reason the split exists. The -23.3% at
+    a 0.15 target came from reading a table of five targets over the WHOLE
+    2018-2026 window; re-reporting it as a policy result would be quoting a
+    number back at the data that produced it.
+
+    A holdout only tests drawdown control if the holdout contains something to
+    survive, so the unscaled drawdown over the same window is reported beside
+    it. If the holdout was calm, passing there says nothing and this function
+    says so rather than claiming a pass.
+    """
+    panel = load_panel(min_rows=250)
+    panel = panel.loc[panel.index >= pd.Timestamp(WINDOW_START)]
+    split = pd.Timestamp(HOLDOUT_START)
+    dev_panel = panel.loc[panel.index < split]
+    # The holdout needs vol-estimate warmup from dev history, which is
+    # read-only and ends before the holdout starts.
+    hold_panel = panel.loc[panel.index >= split]
+    warm_panel = panel.loc[panel.index < split].tail(VOL_LOOKBACK * 2)
+
+    print(f"dev    : {dev_panel.index[0].date()} -> {dev_panel.index[-1].date()}"
+          f"  ({len(dev_panel)} 日)")
+    print(f"holdout: {hold_panel.index[0].date()} -> {hold_panel.index[-1].date()}"
+          f"  ({len(hold_panel)} 日)\n")
+
+    dev_gross = gross_returns(dev_panel)
+    dev_rows = {}
+    for tv in TARGET_VOLS:
+        net = apply_exposure(dev_gross, exposure_path(dev_gross, tv))
+        dev_rows[tv] = {"max_drawdown": _max_dd(net),
+                        "sharpe": _sharpe(net),
+                        "cagr": float((1 + net).prod() ** (TRADING_DAYS / len(net)) - 1)}
+        print(f"  dev 目標 {tv:.0%}: 回撤 {dev_rows[tv]['max_drawdown']:.1%}  "
+              f"Sharpe {dev_rows[tv]['sharpe']:.2f}")
+
+    feasible = [tv for tv in TARGET_VOLS
+                if dev_rows[tv]["max_drawdown"] >= MAX_DD_LIMIT]
+    if not feasible:
+        chosen = min(TARGET_VOLS)
+        note = ("no dev target respected the limit; frozen at the smallest "
+                "available, so the holdout is testing the best this mechanism "
+                "can do rather than a target known to work")
+    else:
+        chosen = max(feasible)
+        note = "largest dev target whose drawdown respected the limit"
+    print(f"\n  → 凍結目標 = {chosen:.0%}（{note}）\n")
+
+    combined = pd.concat([warm_panel, hold_panel])
+    gross_all = gross_returns(combined)
+    net_all = apply_exposure(gross_all, exposure_path(gross_all, chosen))
+    net = net_all.loc[net_all.index >= hold_panel.index[0]]
+    unscaled = gross_all.loc[gross_all.index >= hold_panel.index[0]]
+
+    mc = MonteCarloValidator(n_sims=sims, seed=42).run(
+        [float(v) for v in net.tolist()])
+    dd, dd_unscaled = _max_dd(net), _max_dd(unscaled)
+    result = {
+        "frozen_target_vol": chosen,
+        "selection_note": note,
+        "dev_window": [str(dev_panel.index[0].date()), str(dev_panel.index[-1].date())],
+        "holdout_window": [str(hold_panel.index[0].date()), str(hold_panel.index[-1].date())],
+        "dev_table": {f"{k:.2f}": v for k, v in dev_rows.items()},
+        "holdout": {
+            "n_days": int(len(net)),
+            "sharpe_annualized": _sharpe(net),
+            "cagr": float((1 + net).prod() ** (TRADING_DAYS / len(net)) - 1),
+            "max_drawdown": dd,
+            "profit_factor": _profit_factor(net),
+            "mc_p5_sharpe": float(mc.sharpe.p5),
+            "drawdown_gate_pass": dd >= MAX_DD_LIMIT,
+        },
+        "holdout_unscaled_max_drawdown": dd_unscaled,
+        "holdout_had_stress": dd_unscaled < MAX_DD_LIMIT,
+    }
+    h = result["holdout"]
+    print(f"  holdout ({h['n_days']} 日): Sharpe {h['sharpe_annualized']:.2f}  "
+          f"CAGR {h['cagr']:.1%}  回撤 {dd:.1%}  PF {h['profit_factor']:.2f}  "
+          f"MC p5 {h['mc_p5_sharpe']:+.2f}")
+    print(f"  回撤閘門 {'PASS' if h['drawdown_gate_pass'] else 'FAIL'}")
+    print(f"\n  同期未縮放回撤 {dd_unscaled:.1%} —— "
+          + ("保留窗確實有壓力事件，通過是有意義的"
+             if result["holdout_had_stress"] else
+             "保留窗未出現超過上限的回撤，所以通過閘門幾乎不帶資訊"))
+
+    out = ROOT / "backtests/reports/vol_target_policy_holdout.json"
+    out.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
+    print(f"\nWrote {out}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--sims", type=int, default=2000)
     ap.add_argument("--wfo", action="store_true",
                     help="walk-forward the target vol and score all 7 gates")
+    ap.add_argument("--policy-holdout", action="store_true",
+                    help="set the target on a dev window, test it on a holdout")
     args = ap.parse_args()
+
+    if args.policy_holdout:
+        return policy_holdout(args.sims)
 
     panel = load_panel(min_rows=250)
     panel = panel.loc[panel.index >= pd.Timestamp(WINDOW_START)]
