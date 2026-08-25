@@ -32,7 +32,12 @@ import pytest
 from python.backtest import intraday_engine as eng
 from python.backtest.daily_breakout_engine import DailyBreakoutConfig, run_daily_breakout_backtest
 from python.backtest.optimize import build_intraday_backtest_fn, build_pairs_backtest_fn, load_wfo_config
-from python.backtest.walk_forward import WalkForwardOptimizer, WFOConfig, rescore_folds
+from python.backtest.walk_forward import (
+    WalkForwardOptimizer,
+    WFOConfig,
+    min_positive_folds,
+    rescore_folds,
+)
 from python.core.fees_equity import round_trip_cost
 from python.core.strategies.daily_range_breakout import evaluate_daily_breakout
 from python.microstructure import context as ctx
@@ -229,6 +234,103 @@ def test_wfo_fold_with_zero_trades_is_excluded_not_counted_as_a_pass():
     assert wfo.evaluable_folds == wfo.total_folds - 2
     assert wfo.passing_folds == wfo.evaluable_folds
     assert wfo.pass_ratio == pytest.approx(1.0)
+    assert wfo.decision == "GO"
+
+
+def _wfo_with_sharpes(is_sharpes: list[float], oos_sharpes: list[float], **cfg_kw):
+    """Run a WFO where each fold's IS and OOS Sharpe are dictated exactly.
+
+    Lets a test state the shape it cares about (an overfit fold, a coin-flip
+    fold) as numbers rather than trying to induce it from synthetic prices.
+    """
+    assert len(is_sharpes) == len(oos_sharpes)
+    is_days, oos_days, step = 100, 50, 50
+    start = datetime(2020, 1, 1)
+
+    def backtest_fn(qstart, qend, params):
+        offset = (qstart - start).days
+        is_phase = (qend - qstart).days == is_days
+        idx = (offset if is_phase else offset - is_days) // step
+        table = is_sharpes if is_phase else oos_sharpes
+        return {"sharpe_ratio": table[idx], "n_trades": 25}
+
+    cfg = WFOConfig(is_days=is_days, oos_days=oos_days, step_days=step, **cfg_kw)
+    end = start + timedelta(days=is_days + step * len(is_sharpes))
+    return WalkForwardOptimizer(backtest_fn, cfg, [{}]).run(start, end)
+
+
+def test_min_positive_folds_matches_the_binomial_null():
+    """The breadth bar must be the smallest count chance rarely reaches.
+
+    Computed here from first principles (count the coin-flip outcomes with at
+    least k heads out of 2**n) rather than by calling the implementation's own
+    arithmetic back at it.
+    """
+    from itertools import product
+
+    for n in range(1, 13):
+        k = min_positive_folds(n, 0.10)
+        outcomes = list(product((0, 1), repeat=n))
+        at_least = lambda j: sum(1 for o in outcomes if sum(o) >= j) / len(outcomes)
+        assert at_least(k) <= 0.10, f"n={n}: bar of {k} lets chance through"
+        assert at_least(k - 1) > 0.10, f"n={n}: bar of {k} is stricter than needed"
+
+
+def test_wfo_rejects_the_coin_flip_shape_the_old_rule_accepted():
+    """Half the folds profitable is chance, and must not read as a GO.
+
+    This is the exact shape behind the old rule's 41-53% false positive rate
+    (scripts/design_wfo_gate.py): with IS Sharpe negative the per-fold decay
+    test degenerates to `oos >= 0`, so every fold that merely landed above
+    zero scored a PASS, and four of eight cleared the 0.50 ratio.
+    """
+    wfo = _wfo_with_sharpes(
+        is_sharpes=[-1.0] * 8,
+        oos_sharpes=[0.1, 0.1, 0.1, 0.1, -0.1, -0.1, -0.1, -0.1],
+        min_pass_folds_ratio=0.50,  # the value configs/goal.yaml actually ran
+    )
+    assert wfo.pass_ratio == pytest.approx(0.5), "old rule would have called this GO"
+    assert wfo.positive_folds == 4
+    assert wfo.required_positive_folds == 7
+    assert wfo.decision == "NO-GO"
+
+
+def test_wfo_legacy_rule_still_reproduces_the_old_verdict():
+    """The 19 published cells were scored under the old rule; keep it reachable.
+
+    `min_pass_folds_ratio` is pinned to 0.50 here because that is what those
+    runs used: `configs/goal.yaml` sets it, overriding the WFOConfig default of
+    0.60. Constructing a WFOConfig directly does NOT pick the file up, so a
+    test that omitted it would be reproducing a rule nothing ever ran under.
+    """
+    kw = dict(
+        is_sharpes=[-1.0] * 8,
+        oos_sharpes=[0.1, 0.1, 0.1, 0.1, -0.1, -0.1, -0.1, -0.1],
+        min_pass_folds_ratio=0.50,
+    )
+    assert _wfo_with_sharpes(**kw, legacy_pass_ratio_rule=True).decision == "GO"
+    assert _wfo_with_sharpes(**kw).decision == "NO-GO"
+
+
+def test_wfo_rejects_an_overfit_run_that_breadth_alone_would_pass():
+    """Every fold profitable, but only barely, after a stellar in-sample.
+
+    Proves the decay half of the rule is load-bearing: breadth sees 8 of 8
+    positive and is satisfied, so without the decay test this shape — the
+    signature of picking the best of many parameter sets on in-sample data —
+    would score a GO.
+    """
+    wfo = _wfo_with_sharpes(is_sharpes=[2.0] * 8, oos_sharpes=[0.05] * 8)
+    assert wfo.positive_folds == 8 >= wfo.required_positive_folds, (
+        "test needs breadth to be satisfied for the decay test to be the "
+        "thing under examination"
+    )
+    assert wfo.decision == "NO-GO"
+
+
+def test_wfo_passes_a_strategy_that_is_broad_and_holds_its_edge():
+    """The gate must still say GO to something genuinely good."""
+    wfo = _wfo_with_sharpes(is_sharpes=[2.0] * 8, oos_sharpes=[1.5] * 8)
     assert wfo.decision == "GO"
 
 
