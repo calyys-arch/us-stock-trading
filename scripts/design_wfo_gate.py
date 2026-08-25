@@ -170,11 +170,33 @@ def gate_breadth_and_decay(folds: list[Fold]) -> bool:
     return gate_calibrated_breadth(folds) and gate_pooled_decay(folds)
 
 
+def gate_mean_decay(folds: list[Fold]) -> bool:
+    """Decay on the MEAN of per-fold Sharpes rather than on pooled returns.
+
+    `pooled_decay` is the statistically cleaner statement, but FoldResult
+    stores per-fold Sharpes and OOS metrics — not the in-sample return
+    series — so pooling in-sample returns is not implementable against
+    stored runs without re-running them. Averaging fold Sharpes gets the
+    same 1/sqrt(n_folds) noise reduction from data that already exists.
+    Whether that costs anything is measured rather than assumed.
+    """
+    is_mean = sum(_sharpe_ann(f.is_returns) for f in folds) / len(folds)
+    oos_mean = sum(_sharpe_ann(f.oos_returns) for f in folds) / len(folds)
+    if is_mean <= 0:
+        return oos_mean > 0
+    return oos_mean >= is_mean * DECAY_KEEP
+
+
+def gate_breadth_and_mean_decay(folds: list[Fold]) -> bool:
+    return gate_calibrated_breadth(folds) and gate_mean_decay(folds)
+
+
 CANDIDATES = {
     "shipped": gate_shipped,
     "calibrated_breadth": gate_calibrated_breadth,
     "pooled_decay": gate_pooled_decay,
     "breadth_and_decay": gate_breadth_and_decay,
+    "breadth_and_mean_decay": gate_breadth_and_mean_decay,
 }
 
 
