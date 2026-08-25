@@ -131,6 +131,15 @@ class WFOConfig:
     # entry-hypothesis cells were scored under, kept so their numbers stay
     # reproducible.
     legacy_pass_ratio_rule: bool = False
+    # How each fold picks its parameters from in-sample metrics.
+    # "sharpe": highest in-sample Sharpe — the default every published run
+    # used. "sharpe_subject_to_drawdown": highest in-sample Sharpe among
+    # candidates whose in-sample drawdown is within `selection_max_drawdown`,
+    # falling back to the smallest drawdown when none qualify. Use the second
+    # when drawdown is a hard gate, or selection can pick a parameter that
+    # scores well on Sharpe and then fails the gate the strategy is judged on.
+    selection_objective: str = "sharpe"
+    selection_max_drawdown: float = 0.25
     # False (default): ROLLING fixed-width IS window that SLIDES forward by
     # step_days each fold — the original behavior, byte-identical for every
     # existing caller (backtests/reports/regime_gate_robustness_report.md
@@ -329,6 +338,40 @@ class WalkForwardOptimizer:
         self._cfg = config or WFOConfig()
         self._param_grid: list = list(param_grid) if param_grid else [{}]
 
+    @staticmethod
+    def _select(scored: list[tuple[dict, dict]], cfg: WFOConfig
+                ) -> tuple[dict, dict]:
+        """Choose a fold's parameters from in-sample metrics.
+
+        Default is highest in-sample Sharpe, which is what every published run
+        used. The opt-in alternative exists because that default can be blind
+        to the constraint a strategy is actually judged on. Volatility
+        targeting is the clean example: Sharpe moved only from 1.11 to 1.22
+        across exposure targets, so selection was effectively noise, and it
+        picked high targets that then failed `oos_drawdown_within_limit` at
+        -34% -- the objective and the binding gate disagreed.
+
+        `sharpe_subject_to_drawdown` is feasibility-first: take the highest
+        in-sample Sharpe AMONG candidates whose in-sample drawdown is inside
+        the limit, and if none qualify, take the smallest drawdown instead.
+        Both branches read only in-sample data, so the constraint costs no
+        look-ahead. Drawdowns are compared as magnitudes, since callers report
+        them with either sign.
+        """
+        if not scored:
+            return {}, {}
+        if cfg.selection_objective == "sharpe_subject_to_drawdown":
+            limit = abs(cfg.selection_max_drawdown)
+            feasible = [
+                (c, m) for c, m in scored
+                if abs(float(m.get("max_drawdown") or 0.0)) <= limit
+            ]
+            if feasible:
+                return max(feasible, key=lambda cm: cm[1].get("sharpe_ratio", 0.0))
+            return min(scored,
+                       key=lambda cm: abs(float(cm[1].get("max_drawdown") or 0.0)))
+        return max(scored, key=lambda cm: cm[1].get("sharpe_ratio", 0.0))
+
     def run(self, start: datetime, end: datetime) -> WFOResult:
         cfg = self._cfg
         folds: list[FoldResult] = []
@@ -350,16 +393,11 @@ class WalkForwardOptimizer:
             if oos_end > end:
                 break
 
-            best_params: dict = {}
-            best_sharpe = -math.inf
-            is_metrics: dict = {}
+            scored = []
             for candidate in self._param_grid:
                 metrics = self._backtest_fn(is_start, is_end, candidate)
-                sharpe = metrics.get("sharpe_ratio", 0.0)
-                if sharpe > best_sharpe:
-                    best_sharpe = sharpe
-                    best_params = candidate
-                    is_metrics = metrics
+                scored.append((candidate, metrics))
+            best_params, is_metrics = self._select(scored, cfg)
 
             oos_metrics = self._backtest_fn(is_end, oos_end, best_params)
             oos_sharpe = oos_metrics.get("sharpe_ratio", 0.0)

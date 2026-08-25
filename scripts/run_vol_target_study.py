@@ -130,7 +130,8 @@ def _score(net: pd.Series, exposure_mean: float, sims: int) -> dict:
     }
 
 
-def run_vol_target_wfo(panel: pd.DataFrame, cost_multiplier: float = 1.0) -> dict:
+def run_vol_target_wfo(panel: pd.DataFrame, cost_multiplier: float = 1.0,
+                       selection_objective: str = "sharpe") -> dict:
     """Walk-forward the target vol instead of choosing it by inspection.
 
     This is the load-bearing test of the whole study. Reading a table of five
@@ -172,7 +173,15 @@ def run_vol_target_wfo(panel: pd.DataFrame, cost_multiplier: float = 1.0) -> dic
             "daily_returns": [float(v) for v in net.tolist()],
         }
 
-    cfg = WFOConfig(is_days=504, oos_days=126, step_days=126)
+    cfg = WFOConfig(
+        is_days=504, oos_days=126, step_days=126,
+        # Selecting on Sharpe alone picked targets from 0.15 to 0.35, because
+        # Sharpe barely separates them, and the chosen folds then failed the
+        # drawdown gate at -34%. The constraint the strategy is judged on has
+        # to be part of how it picks its own parameter.
+        selection_objective=selection_objective,
+        selection_max_drawdown=abs(MAX_DD_LIMIT),
+    )
     result = WalkForwardOptimizer(backtest_fn, cfg, grid).run(
         panel.index[0].to_pydatetime(), panel.index[-1].to_pydatetime())
 
@@ -265,9 +274,29 @@ def main() -> int:
 
     gates = None
     if args.wfo:
-        print("\n=== 走步最佳化：讓它自己在樣本外選目標波動 ===", flush=True)
-        wfo = run_vol_target_wfo(panel)
-        stress = run_vol_target_wfo(panel, cost_multiplier=1.5)
+        # Run BOTH selection rules. Reporting only the constrained one would
+        # leave "the fix worked" as an assertion; the pair makes the drawdown
+        # difference attributable to the selection rule and nothing else,
+        # since the grid, folds and costs are identical.
+        print("\n=== 走步最佳化：兩種選擇規則並排 ===", flush=True)
+        for label, objective in (("依 Sharpe 選（原本）", "sharpe"),
+                                 ("回撤約束下選（修正）",
+                                  "sharpe_subject_to_drawdown")):
+            r = run_vol_target_wfo(panel, selection_objective=objective)
+            print(f"\n   [{label}] {r['decision']}  "
+                  f"{r['positive_folds']}/{r['evaluable_folds']} 折為正"
+                  f"（需 {r['required_positive_folds']}）", flush=True)
+            print(f"      選到的目標波動: {r['chosen_target_vols']}", flush=True)
+            print(f"      彙總 OOS Sharpe {r['pooled_oos_sharpe']:.2f}  "
+                  f"PF {r['pooled_oos_profit_factor']:.2f}  "
+                  f"最差單折回撤 {r['worst_fold_drawdown']:.1%}", flush=True)
+
+        wfo = run_vol_target_wfo(
+            panel, selection_objective="sharpe_subject_to_drawdown")
+        stress = run_vol_target_wfo(
+            panel, cost_multiplier=1.5,
+            selection_objective="sharpe_subject_to_drawdown")
+        print("\n=== 修正後的完整閘門 ===", flush=True)
         gates = {
             "wfo_go": wfo["decision"] == "GO",
             "has_oos_trades": wfo["min_trades_in_a_fold"] > 0,
