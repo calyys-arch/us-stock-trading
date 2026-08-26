@@ -123,6 +123,129 @@ def _fetch_remote(
     return panel, "yfinance"
 
 
+def top_up_cached_panel(
+    symbols: list[str],
+    end: str | pd.Timestamp,
+    cache_dir: str | Path = CACHE_DIR,
+    broker_config_path: str | Path = BROKER_CONFIG_PATH,
+    overlap_days: int = 15,
+    tolerance: float = 0.002,
+) -> dict:
+    """Extend cached symbols to `end` by fetching only the recent tail.
+
+    `refresh=True` on get_cached_price_panel re-downloads every symbol's whole
+    history, which for 120 names over ten years takes about eight minutes. That
+    is fine once but hostile as a daily routine: the friction is what puts gaps
+    in a forward record. Fetching a short tail instead takes seconds.
+
+    The catch is that yfinance serves split- and dividend-adjusted prices, so a
+    corporate action REWRITES history rather than only adding to it. Blindly
+    appending would leave the old rows on stale adjustment factors and
+    manufacture a fake gap at the seam. So the fetch deliberately overlaps the
+    cache, and any symbol whose overlapping closes disagree by more than
+    `tolerance` is re-fetched in full over its originally requested range
+    instead of being patched.
+
+    Returns a summary of what happened to each symbol, so callers can report
+    honestly rather than assuming success.
+    """
+    cache_dir = Path(cache_dir)
+    end_ts = pd.Timestamp(end)
+    symbols = [s.upper() for s in symbols]
+    disk_meta = _load_meta(cache_dir)
+
+    cached: dict[str, pd.DataFrame] = {}
+    missing: list[str] = []
+    for symbol in symbols:
+        path = _symbol_csv(cache_dir, symbol)
+        if not path.exists():
+            missing.append(symbol)
+            continue
+        frame = pd.read_csv(path, parse_dates=["date"]).set_index("date")
+        if frame.empty:
+            missing.append(symbol)
+        else:
+            cached[symbol] = frame.sort_index()
+
+    out: dict[str, list[str]] = {
+        "topped_up": [], "readjusted": [], "already_current": [],
+        "not_cached": missing, "failed": [],
+    }
+    if not cached:
+        return out
+
+    oldest_last = min(f.index[-1] for f in cached.values())
+    fetch_start = oldest_last - pd.Timedelta(days=overlap_days)
+    if fetch_start >= end_ts:
+        out["already_current"] = sorted(cached)
+        return out
+
+    log.info("price_cache: topping up %d symbols from %s to %s",
+             len(cached), fetch_start.date(), end_ts.date())
+    try:
+        fetched, source = _fetch_remote(sorted(cached), fetch_start, end_ts,
+                                        broker_config_path)
+    except RuntimeError as exc:
+        log.warning("price_cache: top-up fetch returned nothing (%s)", exc)
+        out["failed"] = sorted(cached)
+        return out
+
+    available = set(fetched.index.get_level_values(1).unique())
+    readjusted: list[str] = []
+    for symbol, old in cached.items():
+        if symbol not in available:
+            out["failed"].append(symbol)
+            continue
+        new = fetched.xs(symbol, level=1)[_OHLCV_COLUMNS].sort_index()
+        shared = old.index.intersection(new.index)
+        if len(shared):
+            a = old.loc[shared, "close"].astype(float)
+            b = new.loc[shared, "close"].astype(float)
+            drift = ((a - b).abs() / b.where(b != 0)).max()
+            if pd.notna(drift) and drift > tolerance:
+                readjusted.append(symbol)
+                continue
+        added = new.index.difference(old.index)
+        if not len(added):
+            out["already_current"].append(symbol)
+            continue
+        merged = pd.concat([old, new.loc[added]]).sort_index()
+        merged = merged[~merged.index.duplicated(keep="last")]
+        merged.to_csv(_symbol_csv(cache_dir, symbol), index_label="date")
+        entry = dict(disk_meta.get(symbol) or {})
+        entry.update({
+            "requested_start": entry.get("requested_start",
+                                         str(old.index[0].date())),
+            "requested_end": str(end_ts.date()),
+            "source": source,
+            "fetched_at": pd.Timestamp.now("UTC").isoformat(),
+        })
+        disk_meta[symbol] = entry
+        out["topped_up"].append(symbol)
+
+    if readjusted:
+        # A corporate action rewrote these histories, so patching the tail
+        # would splice two different adjustment bases together.
+        log.info("price_cache: %d symbols re-adjusted upstream, re-fetching "
+                 "in full: %s", len(readjusted), ", ".join(sorted(readjusted)))
+        for symbol in sorted(readjusted):
+            start = pd.Timestamp((disk_meta.get(symbol) or {}).get(
+                "requested_start") or cached[symbol].index[0])
+            try:
+                _, _, _ = get_cached_price_panel(
+                    [symbol], start, end_ts, refresh=True, cache_dir=cache_dir,
+                    broker_config_path=broker_config_path)
+                out["readjusted"].append(symbol)
+            except RuntimeError:
+                out["failed"].append(symbol)
+        disk_meta = _load_meta(cache_dir)
+
+    _save_meta(cache_dir, disk_meta)
+    for key in out:
+        out[key] = sorted(set(out[key]))
+    return out
+
+
 def get_cached_price_panel(
     symbols: list[str],
     start: str | pd.Timestamp,

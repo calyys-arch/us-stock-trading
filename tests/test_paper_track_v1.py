@@ -39,8 +39,9 @@ def ledger(tmp_path, monkeypatch):
 
 
 def _args(**kw):
+    # no_update stays on: these tests must never reach the network.
     base = {"init": False, "capital": 100_000.0, "target_vol": 0.15,
-            "report": False}
+            "report": False, "no_update": True}
     base.update(kw)
     return type("Args", (), base)()
 

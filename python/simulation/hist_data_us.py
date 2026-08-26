@@ -78,6 +78,73 @@ def fetch_daily_bars(
     raise RuntimeError(f"hist_data_us: failed to fetch {symbol} after {max_retries} attempts: {last_exc}")
 
 
+def fetch_daily_bars_batch(
+    symbols: list[str],
+    start: str,
+    end: str,
+    chunk_size: int = 40,
+) -> dict[str, pd.DataFrame]:
+    """Fetch many symbols per request instead of one at a time.
+
+    One symbol per `yf.download` call plus a 2 req/s limiter costs about 2.8
+    seconds per name, so 120 names took roughly seven minutes whether the range
+    was ten years or ten days -- the cost is per REQUEST, not per byte. That is
+    tolerable for a one-off backfill and hostile as a daily routine, where the
+    friction is what puts gaps in a forward record.
+
+    yfinance accepts a list and returns a ticker-keyed frame, so a chunk of 40
+    costs one limiter slot instead of 40. Symbols missing from the response are
+    simply absent from the returned dict; callers decide whether to retry them
+    individually, since one delisted ticker must not void the whole chunk.
+
+    Adjustment discipline is identical to the single-symbol path:
+    `auto_adjust=True` is always passed explicitly.
+    """
+    try:
+        import yfinance as yf
+    except ImportError as exc:
+        raise RuntimeError("hist_data_us: yfinance not installed. "
+                           "Run: pip install yfinance") from exc
+
+    limiter = _get_rate_limiter()
+    out: dict[str, pd.DataFrame] = {}
+    wanted = ["open", "high", "low", "close", "volume"]
+
+    for i in range(0, len(symbols), chunk_size):
+        chunk = symbols[i:i + chunk_size]
+        for _ in range(30):
+            if limiter.try_acquire():
+                break
+            time.sleep(0.5)
+        try:
+            raw = yf.download(chunk, start=start, end=end, auto_adjust=True,
+                              progress=False, threads=True, group_by="ticker")
+        except Exception as exc:
+            log.warning("hist_data_us: batch fetch failed for %d symbols "
+                        "(%s...): %s", len(chunk), chunk[0], exc)
+            continue
+        if raw is None or raw.empty:
+            log.warning("hist_data_us: batch returned nothing for %d symbols "
+                        "(%s...)", len(chunk), chunk[0])
+            continue
+
+        for symbol in chunk:
+            try:
+                # A single-symbol chunk comes back without the ticker level.
+                df = raw[symbol] if isinstance(raw.columns, pd.MultiIndex) \
+                    else raw
+            except KeyError:
+                continue
+            df = df.rename(columns={c: str(c).lower() for c in df.columns})
+            if not set(wanted).issubset(df.columns):
+                continue
+            df = df[wanted].dropna(how="all")
+            if not df.empty:
+                out[symbol] = df
+
+    return out
+
+
 def build_price_panel(
     symbols: list[str],
     start: str,
@@ -94,12 +161,19 @@ def build_price_panel(
     frames = []
     quality_flags: dict = {}
 
+    # Batch first, then retry only the stragglers one at a time. A delisted
+    # ticker returning nothing must not cost the other 39 in its chunk their
+    # data, and it must still get its individual attempt so the "confirmed
+    # absent" result is real rather than a batch artifact.
+    batched = fetch_daily_bars_batch(symbols, start, end) if len(symbols) > 1 else {}
     for symbol in symbols:
-        try:
-            df = fetch_daily_bars(symbol, start, end)
-        except RuntimeError as exc:
-            log.error("build_price_panel: skipping %s — %s", symbol, exc)
-            continue
+        df = batched.get(symbol)
+        if df is None:
+            try:
+                df = fetch_daily_bars(symbol, start, end)
+            except RuntimeError as exc:
+                log.error("build_price_panel: skipping %s — %s", symbol, exc)
+                continue
 
         report = quality_report(df["close"])
         if report["n_extreme_moves_flagged"] > 0 or report["n_zero_or_negative_prices"] > 0:

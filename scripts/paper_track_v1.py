@@ -176,6 +176,30 @@ def _trade_to(holdings: dict[str, float], prices: pd.Series,
     return new, max(cash, 0.0), cost
 
 
+def _top_up() -> None:
+    """Bring the cache to today's close before advancing the ledger."""
+    from python.data.price_cache import top_up_cached_panel
+
+    symbols, _ = load_universe()
+    print("更新價格 ...", flush=True)
+    result = top_up_cached_panel(symbols, pd.Timestamp.today().normalize())
+    parts = [f"{len(result['topped_up'])} 檔延伸",
+             f"{len(result['already_current'])} 檔已最新"]
+    if result["readjusted"]:
+        parts.append(f"{len(result['readjusted'])} 檔因除權/分割重抓")
+    if result["not_cached"]:
+        parts.append(f"{len(result['not_cached'])} 檔無快取")
+    if result["failed"]:
+        parts.append(f"{len(result['failed'])} 檔失敗")
+    print("  " + "，".join(parts))
+    if result["readjusted"]:
+        print(f"  重抓：{', '.join(result['readjusted'])}")
+    if result["failed"]:
+        print(f"  !! 失敗：{', '.join(result['failed'])}"
+              f" — 這些標的會用舊價格結算")
+    print()
+
+
 def _run(args: argparse.Namespace) -> int:
     symbols, bucket_of = load_universe()
     panel = load_prices(symbols)
@@ -213,7 +237,10 @@ def _run(args: argparse.Namespace) -> int:
     if not len(pending):
         print(f"帳本已到 {last_date.date()}，價格也只到 "
               f"{panel.index[-1].date()}，沒有新交易日。")
-        print(f"要往前推進得先更新價格（見 --help 的說明）。")
+        if args.no_update:
+            print("（本次用 --no-update 跳過了價格更新）")
+        else:
+            print("下一個美股收盤後再跑就會推進。")
         return 0
 
     print(f"帳本在 {last_date.date()}，價格到 {panel.index[-1].date()}，"
@@ -328,8 +355,14 @@ def main() -> int:
                     help="volatility target recorded at --init")
     ap.add_argument("--report", action="store_true",
                     help="summarize the record so far")
+    ap.add_argument("--no-update", action="store_true",
+                    help="skip the price top-up and use the cache as-is")
     args = ap.parse_args()
-    return _report() if args.report else _run(args)
+    if args.report:
+        return _report()
+    if not args.no_update:
+        _top_up()
+    return _run(args)
 
 
 if __name__ == "__main__":
