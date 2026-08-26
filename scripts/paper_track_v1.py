@@ -22,15 +22,39 @@ THE RECORD STARTS EMPTY, ON PURPOSE. It does not replay history to
 manufacture a track record -- that would be another backtest wearing a
 different hat. Everything in the journal is dated after --init.
 
-ONE DISCREPANCY WITH THE BACKTEST, MEASURED RATHER THAN FEARED. The backtest's
-`gross_returns` re-weights constituents to equal-within-bucket EVERY day and
-charges nothing for it, billing only changes in total exposure, so the measured
-Sharpe of 0.91 assumed free daily rebalancing. Sizing that assumption: pulling
-120 names back to equal-within-bucket costs 0.85% of the book in one-way
-turnover per day, which at 4bps is 0.09% per YEAR against an 11.5% CAGR --
-about 0.01 of Sharpe. Immaterial. This ledger still rebalances constituents
-monthly and charges every dollar it trades, but the gap that creates against
-the backtest is basis points, not a correction that changes any decision.
+WHAT IT COSTS TO TRADE, PRICED THE WAY A BROKER PRICES IT. This ledger used to
+charge a flat 4bps of notional. That is a fair model of spread and says nothing
+about commission, which is billed per ORDER: IBKR Pro Fixed charges $0.005 a
+share, minimum $1.00 an order, capped at 1% of trade value. At retail size the
+minimum is most of the bill -- entering 120 positions of $817 costs $120 in
+minimums against $39 of spread -- and the omission was worth about 0.7% a year
+at $100k. Both are now charged, per order, by
+python/portfolio/broker_costs.py.
+
+WHICH LIMB BINDS, BECAUSE IT IS NOT THE OBVIOUS ONE. Entry is governed by the
+$1.00 floor. Small rebalances are governed by the 1% CAP, so a 10-cent
+adjustment costs a tenth of a cent, not a dollar. The money goes on the middle:
+an order over $100 but under 200 shares pays the full $1.00, which on a $200
+drift correction is 50bps of the value moved. An earlier note in this repo
+applied the floor to everything and claimed a 1.44%-a-year drag; that was wrong
+by roughly 4x.
+
+SO THE MONTHLY CONSTITUENT REBALANCE MOSTLY DOES NOT HAPPEN ANY MORE.
+DRIFT_BAND_BPS refuses any drift correction whose commission would exceed 10bps
+of the value it moves, which at this account size means most of them. Measured
+over 2018-2026 at $100k with fractional shares, that took fees from $6,060 to
+$2,473 and monthly orders from 117 to 1. It is worth +0.42pp of CAGR in saved
+fees; the run also picked up +0.96pp from letting weights drift, which is one
+window's luck and is not part of the case for doing this.
+
+The band NEVER applies to entering or to an exposure change. Those orders are
+small by nature -- a tenth off every position -- so a notional floor blocks
+precisely the trades that defend against a drawdown. Applying it to everything
+cost 2.8pp of CAGR in measurement by silently disabling the volatility brake.
+Because exposure changes always rebalance in full, the brake doubles as the
+constituent rebalancer, which is why dropping the monthly reset does not let
+the book concentrate: the largest single position peaked at 4.4% against a 2.5%
+target over eight years.
 
 THE BAND ANCHORS ON THE APPLIED TARGET, which it did not always. This ledger
 used to measure the 10% rebalance band against `invested / equity` -- the
@@ -44,6 +68,15 @@ tests/test_exposure_band_is_one_rule.py replays this ledger against
 `exposure_path` day by day to keep them together. Each row still records
 `exposure_held` and `exposure_drift` so the wander is visible, but nothing
 decides on it.
+
+WHAT TO EXPECT, NOW THAT EXECUTION IS PRICED. On the full 120-name book at
+$100k over 2018-2026, share-level with real commission
+(backtests/reports/retail_cost_study.json): CAGR 11.24%, Sharpe 0.873 with
+fractional shares and the drift band; 9.86%/0.784 with fractional and no band;
+9.12%/0.771 with whole shares and no band. Integer-share rounding alone costs
+0.75pp a year at this size by stranding 4.8% of the account in cash, which is
+more than commission does -- fractional shares are the single largest
+improvement available and this ledger assumes them.
 
 WHAT WOULD FALSIFY THE STRATEGY, stated before the data arrives so it cannot
 be rationalized later. The walk-forward said Sharpe 0.91, profit factor 1.17,
@@ -69,9 +102,12 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from python.portfolio.broker_costs import (  # noqa: E402
+    commission, min_notional_for_cost_ceiling,
+)
 from python.portfolio.strategy_v1 import (  # noqa: E402
-    COLLAPSE, band_exposure, bucket_weighted_gross, load_prices, load_universe,
-    target_weights,
+    COLLAPSE, DRIFT_BAND_BPS, band_exposure, bucket_weighted_gross, load_prices,
+    load_universe, target_weights,
 )
 from scripts.run_daily_baseline_gates import (  # noqa: E402
     TRADING_DAYS, _max_dd, _profit_factor, _sharpe,
@@ -168,12 +204,29 @@ def _wanted_exposure(gross: pd.Series, target_vol: float) -> tuple[float, float]
 
 
 def _size_to(holdings: dict[str, float], prices: pd.Series,
-             weights: dict[str, float], budget: float
+             weights: dict[str, float], budget: float,
+             ceiling: float | None = None
              ) -> tuple[dict[str, float], float, float]:
     """Allocate `budget` dollars across `weights`; return (holdings, invested,
-    cost). Cost is charged on the notional actually traded, both sides."""
-    traded_notional = 0.0
+    cost).
+
+    Cost is spread plus commission, and commission is priced PER ORDER because
+    that is how a broker charges it. The ledger used to charge a flat 4bps of
+    notional, which models spread but is silent on the $1.00-per-order minimum
+    -- and at retail size the minimum is most of the bill. Over 2018-2026 at
+    $100k that omission was worth about 0.7% a year.
+
+    With `ceiling` set, an order whose commission would exceed that share of
+    the value it moves is not placed and the existing line is carried instead.
+    """
+    cost = 0.0
     new: dict[str, float] = {}
+
+    def charge(delta: float, price: float) -> None:
+        nonlocal cost
+        cost += commission(delta, price)
+        cost += abs(delta) * price * (ONE_WAY_COST_BPS / 10_000.0)
+
     for symbol, weight in weights.items():
         price = float(prices.get(symbol, float("nan")))
         if not np.isfinite(price) or price <= 0:
@@ -183,20 +236,27 @@ def _size_to(holdings: dict[str, float], prices: pd.Series,
                 new[symbol] = holdings[symbol]
             continue
         shares = round(max(budget, 0.0) * weight / price, 6)
-        traded_notional += abs(shares - holdings.get(symbol, 0.0)) * price
+        delta = shares - holdings.get(symbol, 0.0)
+        notional = abs(delta) * price
+        if ceiling is not None and notional > 0 and \
+                notional < min_notional_for_cost_ceiling(price, ceiling):
+            new[symbol] = holdings.get(symbol, 0.0)
+            continue
         new[symbol] = shares
+        charge(delta, price)
     for symbol, shares in holdings.items():
         if symbol not in new and shares:
             price = float(prices.get(symbol, float("nan")))
             if np.isfinite(price):
-                traded_notional += abs(shares) * price
+                charge(shares, price)
     invested = sum(sh * float(prices[s]) for s, sh in new.items()
                    if s in prices.index and np.isfinite(prices[s]))
-    return new, invested, traded_notional * (ONE_WAY_COST_BPS / 10_000.0)
+    return new, invested, cost
 
 
 def _trade_to(holdings: dict[str, float], prices: pd.Series,
-              weights: dict[str, float], equity: float, exposure: float
+              weights: dict[str, float], equity: float, exposure: float,
+              ceiling: float | None = None
               ) -> tuple[dict[str, float], float, float]:
     """Move to target weights at `prices`; return (holdings, cash, cost).
 
@@ -216,7 +276,7 @@ def _trade_to(holdings: dict[str, float], prices: pd.Series,
     cost = 0.0
     for _ in range(8):
         new, invested, cost_now = _size_to(holdings, prices, weights,
-                                           target - cost)
+                                           target - cost, ceiling)
         if abs(cost_now - cost) < 1e-9:
             cost = cost_now
             break
@@ -224,7 +284,7 @@ def _trade_to(holdings: dict[str, float], prices: pd.Series,
     cash = equity - invested - cost
     if cash < 0.0:
         new, invested, cost = _size_to(holdings, prices, weights,
-                                       target - cost + cash)
+                                       target - cost + cash, ceiling)
         cash = equity - invested - cost
     return new, max(cash, 0.0), cost
 
@@ -358,8 +418,11 @@ def _run(args: argparse.Namespace) -> int:
             first_time = not holdings
             weights = target_weights(
                 [s for s in symbols if s in panel.columns], bucket_of, "bucket")
+            # Entering and moving exposure go through unbanded; a month that
+            # only drifted pays the band and mostly does nothing.
+            ceiling = None if (band_tripped or first_time) else DRIFT_BAND_BPS
             holdings, cash, cost = _trade_to(holdings, prices, weights,
-                                             equity, target)
+                                             equity, target, ceiling)
             action = "enter" if first_time else "rebalance"
             equity, invested = _equity(holdings, prices, cash)
             held = invested / equity if equity > 0 else 0.0

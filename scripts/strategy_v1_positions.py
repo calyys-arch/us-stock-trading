@@ -188,9 +188,12 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from python.portfolio.broker_costs import (  # noqa: E402
+    commission, min_notional_for_cost_ceiling,
+)
 from python.portfolio.strategy_v1 import (  # noqa: E402
-    COLLAPSE, band_exposure, bucket_weighted_gross, load_prices, load_universe,
-    target_weights,
+    COLLAPSE, DRIFT_BAND_BPS, band_exposure, bucket_weighted_gross, load_prices,
+    load_universe, target_weights,
 )
 from scripts.run_vol_target_study import (  # noqa: E402
     MAX_EXPOSURE, ONE_WAY_COST_BPS, REBALANCE_BAND, VOL_LOOKBACK,
@@ -366,6 +369,8 @@ def main() -> int:
     invested = sum(r[4] for r in rows)
     target = args.capital * exposure
     drag = (target - invested) / target if target else 0.0
+    entry_commission = sum(commission(r[3], r[2]) for r in rows)
+    entry_spread = invested * ONE_WAY_COST_BPS / 10_000.0
     print("-" * 50)
     print(f"{'合計':<21}{'':>9}{'':>9}{invested:>11,.0f}")
     label = "取整缺口" if args.fractional is False else "缺口"
@@ -389,6 +394,37 @@ def main() -> int:
               + (f"，其中 {skipped} 檔連一股都買不起" if skipped else "") + "。")
         print(f"  兩個解法：加 --fractional 用碎股（IBKR 多數美股支援，"
               f"可精確配置）；或把資金提高到約 ${need:,.0f} 讓缺口降到 2% 以下。")
+        print(f"  碎股不只是精確度問題：在 $100k 上它值每年 +0.73pp 的 CAGR，"
+              f"比任何成本調參都大（retail_cost_study.json）。")
+
+    print(f"\n下單成本（IBKR Pro Fixed：$0.005/股，每筆最低 $1.00，"
+          f"上限成交金額 1%）")
+    print(f"  佣金 ${entry_commission:,.2f}（{len(rows)} 筆）"
+          f" + 價差估計 ${entry_spread:,.2f}"
+          f" = ${entry_commission + entry_spread:,.2f}"
+          f"，佔帳戶 {(entry_commission + entry_spread) / args.capital:.2%}")
+    if entry_commission > entry_spread:
+        print(f"  佣金大於價差，因為每筆最低 $1.00 在這個部位大小上是主導項；"
+              f"這是回測原本沒收的錢。")
+
+    # The sheet lists target positions, not deltas, so it cannot apply the
+    # per-order band itself -- it does not know what the account already holds.
+    # What it can do is state the threshold, since that is the number the
+    # operator needs in order to know which adjustments to leave alone.
+    thresholds = sorted(min_notional_for_cost_ceiling(r[2], DRIFT_BAND_BPS)
+                        for r in rows)
+    if thresholds and np.isfinite(thresholds[-1]):
+        lo, hi = thresholds[0], thresholds[-1]
+        # Almost always a single number: while the $1.00 minimum binds, the
+        # threshold is minimum/ceiling and does not depend on share price at
+        # all. It only varies for shares under about $5, where 200 shares is
+        # worth less than $1,000 and the per-share rate takes over first.
+        span = f"${lo:,.0f}" if hi - lo < 1 else f"${lo:,.0f} ~ ${hi:,.0f}"
+        print(f"\n再平衡時的單筆下限（{DRIFT_BAND_BPS:.0f}bps 上限）")
+        print(f"  調整金額低於 {span} 就不要下，"
+              f"佣金會吃掉超過成交金額的 {DRIFT_BAND_BPS:.0f}bps。")
+        print(f"  這條只管成分權重漂移。曝險變動和初次建倉一律照下，"
+              f"不受此限——剎車的單子本來就小，擋掉它等於關掉回撤防護。")
 
     if args.commit:
         STATE_FILE.parent.mkdir(parents=True, exist_ok=True)

@@ -32,6 +32,18 @@ COLLAPSE = {
 BUCKETS = tuple(sorted(set(COLLAPSE.values())))
 
 
+# An order is placed only if commission stays inside this share of the value it
+# moves. Lives here for the same reason band_exposure does: the backtest, the
+# order sheet and the paper ledger have to price a trade the same way or their
+# results are not comparable.
+#
+# It governs correcting constituent drift and nothing else. Entering, and
+# changing exposure, always execute in full -- those orders are small by nature
+# (a tenth off every position) so a notional floor blocks precisely the trades
+# that defend against a drawdown. Applying it to everything cost 2.8pp of CAGR.
+DRIFT_BAND_BPS = 10.0
+
+
 def band_exposure(raw_target: float, last_applied: float | None,
                   band: float) -> tuple[float, bool]:
     """Apply the rebalance band. THE definition of when exposure moves.

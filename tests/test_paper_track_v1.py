@@ -306,3 +306,92 @@ def test_the_run_stops_rather_than_writing_a_mark_it_cannot_defend(
     dates = [r["date"] for r in _entries()]
     # Advanced up to the carry limit, then stopped instead of guessing.
     assert str(blanked.index[301 + pt.MAX_CARRY_DAYS].date()) not in dates
+
+
+def test_commission_is_charged_per_order_not_as_a_flat_rate_on_notional():
+    """The ledger charged 4bps of notional and nothing per order.
+
+    That models spread but is silent on the $1.00 minimum, which at retail size
+    is most of the bill: entering 120 positions of $817 costs $120 in minimums
+    against $39 of spread. Nothing pinned the magnitude, so swapping the cost
+    model in broke no test.
+    """
+    prices = pd.Series({s: 100.0 for s in UNIVERSE})
+    weights = {s: 1.0 / len(UNIVERSE) for s in UNIVERSE}
+    _, _, cost = pt._size_to({}, prices, weights, 6_000.0)
+    spread_only = 6_000.0 * pt.ONE_WAY_COST_BPS / 10_000.0
+    # Six orders of $1,000 each: 10 shares apiece, so the $1.00 floor binds.
+    assert cost == pytest.approx(spread_only + 6 * 1.00, abs=0.01)
+    assert cost > spread_only * 2, "per-order minimums must dominate at this size"
+
+
+def test_the_drift_band_skips_the_orders_where_the_minimum_bites():
+    """Where the band's saving actually comes from.
+
+    A truly tiny order is nearly free in dollars, because the 1% cap overrides
+    the $1.00 floor: a 10-cent trade costs a tenth of a cent. The money goes on
+    mid-sized orders -- above $100 of notional, so the cap no longer protects,
+    but under 200 shares, so the floor still binds. A $200 drift correction is
+    charged the full $1.00, which is 50bps of the value it moved.
+    """
+    prices = pd.Series({s: 100.0 for s in UNIVERSE})
+    weights = {s: 1.0 / len(UNIVERSE) for s in UNIVERSE}
+    held = {s: 10.0 for s in UNIVERSE}  # $1,000 a name
+    # Target $1,200 a name: a $200 order, squarely in the floor's range.
+    _, _, unbanded = pt._size_to(held, prices, weights, 7_200.0)
+    spread = 6 * 200.0 * pt.ONE_WAY_COST_BPS / 10_000.0
+    assert unbanded == pytest.approx(spread + 6 * 1.00, abs=0.01)
+
+    new, _, banded = pt._size_to(held, prices, weights, 7_200.0,
+                                 ceiling=pt.DRIFT_BAND_BPS)
+    assert new == held, "a 50bps order must not be placed under a 10bps band"
+    assert banded == 0.0
+
+
+def test_a_trade_too_small_for_the_minimum_to_bite_is_priced_by_the_cap():
+    prices = pd.Series({s: 100.0 for s in UNIVERSE})
+    weights = {s: 1.0 / len(UNIVERSE) for s in UNIVERSE}
+    held = {s: 10.0 for s in UNIVERSE}
+    # A 10-cent order a name: 1% of value beats the $1.00 floor.
+    _, _, cost = pt._size_to(held, prices, weights, 6_000.6)
+    spread = 6 * 0.10 * pt.ONE_WAY_COST_BPS / 10_000.0
+    assert cost == pytest.approx(spread + 6 * 0.001, abs=1e-4)
+
+
+def test_the_drift_band_still_places_an_order_large_enough_to_be_worth_it():
+    prices = pd.Series({s: 100.0 for s in UNIVERSE})
+    weights = {s: 1.0 / len(UNIVERSE) for s in UNIVERSE}
+    held = {s: 10.0 for s in UNIVERSE}
+    # Doubling every position is a $1,000 order a name, well over the band.
+    new, _, cost = pt._size_to(held, prices, weights, 12_000.0,
+                               ceiling=pt.DRIFT_BAND_BPS)
+    assert all(new[s] > held[s] for s in UNIVERSE)
+    assert cost > 0
+
+
+def test_entering_is_never_subject_to_the_drift_band(ledger, monkeypatch):
+    """A notional floor applied to the entry means a small account never
+    invests, and the flat return that follows looks like a strategy result."""
+    monkeypatch.setattr(pt, "DRIFT_BAND_BPS", 1.0)  # rejects almost everything
+    monkeypatch.setattr(pt, "load_prices", lambda s: ledger.iloc[:300])
+    pt._run(_args(init=True))
+    monkeypatch.setattr(pt, "load_prices", lambda s: ledger.iloc[:301])
+    pt._run(_args())
+    entered = [e for e in _entries() if e["action"] == "enter"]
+    assert entered, "the ledger must still take a position"
+    assert entered[0]["exposure_held"] > 0.5
+
+
+def test_an_exposure_change_is_never_subject_to_the_drift_band(ledger,
+                                                              monkeypatch):
+    """Cutting exposure trims every position by a fraction, so any notional
+    floor blocks the strategy's only defence against a drawdown."""
+    monkeypatch.setattr(pt, "DRIFT_BAND_BPS", 1.0)
+    prices = pd.Series({s: 100.0 for s in UNIVERSE})
+    weights = {s: 1.0 / len(UNIVERSE) for s in UNIVERSE}
+    held = {s: 100.0 for s in UNIVERSE}  # $60,000 invested
+    # A brake event: exposure 1.0 -> 0.6. Unbanded, every line must move.
+    new, cash, cost = pt._trade_to(held, prices, weights, 60_000.0, 0.6,
+                                   ceiling=None)
+    assert all(new[s] < held[s] for s in UNIVERSE), "brake must actually sell"
+    assert cash > 0
