@@ -15,6 +15,7 @@ import pytest
 
 import scripts.paper_track_v1 as pt
 from python.portfolio.strategy_v1 import COLLAPSE
+from scripts.paper_track_v1 import BACKTEST, ROOT
 
 UNIVERSE = {
     "USA": "us_single_name", "USB": "us_sector_etf", "USC": "us_broad_etf",
@@ -182,3 +183,73 @@ def test_paying_costs_never_overdraws_cash_at_full_exposure(ledger):
     assert cost > 0
     assert cash >= -1e-6, "fully invested must not borrow to pay fees"
     assert invested + cost == pytest.approx(10_000.0, abs=0.01)
+
+
+def test_report_measures_returns_from_the_init_row_not_after_it(ledger, monkeypatch, capsys):
+    """The entry cost belongs in Sharpe, not only in the headline total return.
+
+    Building the equity path from the marks alone dropped the init-to-first-mark
+    move, so total return counted the entry cost and every risk statistic did
+    not -- two numbers quoted side by side off two different starting points.
+    """
+    monkeypatch.setattr(pt, "load_prices", lambda s: ledger.iloc[:300])
+    pt._run(_args(init=True))
+    monkeypatch.setattr(pt, "load_prices", lambda s: ledger.iloc[:303])
+    pt._run(_args())
+    capsys.readouterr()
+
+    rows = _entries()
+    equity = [r["equity"] for r in rows]
+    pt._report()
+    out = capsys.readouterr().out
+
+    # One return per gap between journal rows, including init -> first mark.
+    assert f"交易日數        {len(rows) - 1}" in out
+    entry_cost = next(r["cost"] for r in rows if r["action"] == "enter")
+    assert entry_cost > 0
+    assert equity[1] < equity[0], "the entry day must show the cost"
+
+
+def test_the_monthly_rebalance_fires_across_a_year_boundary(ledger, monkeypatch):
+    """A (year, month) comparison is right; comparing month alone would skip
+    December to January and silently hold stale weights for a year."""
+    # Start early enough that the 60-day volatility window is warm before the
+    # year turns, so init can land in December and the run crosses into January.
+    idx = pd.bdate_range("2024-09-02", periods=140)
+    rng = np.random.default_rng(3)
+    panel = pd.DataFrame(
+        {s: 100 * np.exp(np.cumsum(rng.normal(0.0003, 0.01, len(idx))))
+         for s in UNIVERSE}, index=idx)
+    init_at = panel.index.get_indexer([pd.Timestamp("2024-12-18")])[0]
+    monkeypatch.setattr(pt, "load_prices", lambda s: panel.iloc[:init_at + 1])
+    pt._run(_args(init=True))
+    monkeypatch.setattr(pt, "load_prices", lambda s: panel)
+    pt._run(_args())
+
+    rows = [r for r in _entries() if r["action"] == "rebalance"]
+    months = {r["date"][:7] for r in rows}
+    assert "2025-01" in months, \
+        f"December to January did not trigger a rebalance; saw {sorted(months)}"
+
+
+def test_the_quoted_backtest_benchmark_still_matches_its_source():
+    """BACKTEST is a hand-copied number the ledger judges live results against.
+
+    Nothing stopped it drifting from the report it cites -- and re-running the
+    study without --wfo used to delete that section outright. Tie them together
+    so a stale benchmark fails loudly instead of quietly flattering the record.
+    """
+    report = ROOT / BACKTEST["source"]
+    if not report.exists():
+        pytest.skip(f"{BACKTEST['source']} not generated in this checkout")
+    payload = json.loads(report.read_text(encoding="utf-8"))
+    section, arm = BACKTEST["key"].split(".")
+    assert section in payload, \
+        "walk-forward section missing; re-run the study with --wfo"
+    wfo = payload[section][arm]
+    assert wfo["oos_days"] == BACKTEST["oos_days"]
+    assert wfo["oos_sharpe"] == pytest.approx(BACKTEST["sharpe"], abs=0.005)
+    assert wfo["oos_profit_factor"] == pytest.approx(
+        BACKTEST["profit_factor"], abs=0.005)
+    assert wfo["oos_max_drawdown"] == pytest.approx(
+        BACKTEST["max_drawdown"], abs=0.0005)

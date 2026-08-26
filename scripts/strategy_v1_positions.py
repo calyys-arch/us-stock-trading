@@ -29,10 +29,10 @@ walk-forward out-of-sample days (backtests/reports/risk_bucket_study.json):
 
     weighting            Sharpe    PF   max DD   positive folds
     all-120 equal          0.91  1.18   -31.4%           15/19
-    four buckets @ 25%     0.89  1.17   -24.6%           16/19
+    four buckets @ 25%     0.91  1.17   -24.6%           16/19
     buckets @ inverse vol  0.75  1.15   -19.2%           15/19
 
-Bucketing gives up 0.02 Sharpe and buys 6.8 points of drawdown, and it is the
+Bucketing costs nothing in Sharpe and buys 6.8 points of drawdown, and it is the
 only arm whose out-of-sample drawdown stays inside the -25% limit. Inverse-
 volatility weighting cuts drawdown further but is not worth it here: with no
 leverage allowed it parks 55% of the book in bonds, runs at 9.6% realized vol
@@ -48,11 +48,24 @@ part is measured rather than asserted.
 WHAT ELSE WAS MEASURED (vol_target_study.json, _policy_holdout, _gfc_stress,
 diversification_study.json, risk_bucket_study.json):
 
-  2024-01..2026-08 at equal buckets: Sharpe 1.64, CAGR 22.4%, drawdown -11.9%,
-      PF 1.34. That window was used once already to report the all-120 version,
-      so read it as a second look at an a-priori rule, not a fresh holdout.
-  2018-06..2026-08 at a fixed 15% target, equal buckets: Sharpe 0.89,
-      CAGR 11.5%, drawdown -24.6%.
+  2024-01..2026-08 at equal buckets: Sharpe 1.65, CAGR 22.7%, drawdown -11.9%,
+      PF 1.34.
+  2018-06..2026-08 at a fixed 15% target, equal buckets: Sharpe 0.91,
+      CAGR 11.7%, drawdown -24.6%.
+
+TWO CLAIMS OF DIFFERENT QUALITY, which earlier drafts blurred together.
+
+  The 15% target is clean. It was picked on a development window ending
+      2023-12-29 as the largest target whose drawdown still respected the limit,
+      then checked once on 658 days it had never seen (vol_target_policy_holdout
+      .json: Sharpe 1.86, drawdown -15.8%). That is a real holdout.
+  The bucketing is not clean. Three candidate weightings were specified up
+      front, but the winner was chosen by reading walk-forward results that span
+      2018-2026 -- including those same 658 days. Three candidates on a drawdown
+      criterion is mild selection, not a fishing expedition, and the losing arm
+      failed by 6.8 points rather than a hair. Still: the 2024-2026 numbers
+      above are not an out-of-sample test of the bucketing decision, and the
+      forward paper record is the first thing that will be.
   2006-2010 replay on 46 equity ETFs, target frozen, no bonds or commodities:
       drawdown -29.9% where unscaled was -56.2%, but profit factor only 1.05.
 

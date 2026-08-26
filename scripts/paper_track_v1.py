@@ -69,8 +69,9 @@ TARGET_VOL = 0.15
 
 # What the walk-forward measured, for --report to compare against rather than
 # leaving the reader to look it up.
-BACKTEST = {"sharpe": 0.89, "profit_factor": 1.17, "max_drawdown": -0.246,
-            "oos_days": 1646, "source": "backtests/reports/risk_bucket_study.json"}
+BACKTEST = {"sharpe": 0.91, "profit_factor": 1.17, "max_drawdown": -0.246,
+            "oos_days": 1646, "source": "backtests/reports/risk_bucket_study.json",
+            "key": "wfo.bucket_equal"}
 # Below this many days, dispersion swamps any signal and no verdict is offered.
 MIN_DAYS_FOR_VERDICT = 250
 
@@ -306,9 +307,14 @@ def _report() -> int:
         print("帳本太短，還沒有東西可報。")
         return 0
 
+    # Start the equity path AT the init row, not after it. Excluding it dropped
+    # the init-to-first-mark move -- the one that contains the entry cost -- from
+    # Sharpe, profit factor and drawdown, while the headline total return still
+    # counted it. Two numbers, two different starting points.
+    equity = pd.Series([j["equity"] for j in journal],
+                       index=pd.to_datetime([j["date"] for j in journal]))
+    equity = equity[~equity.index.duplicated(keep="last")]
     marks = [j for j in journal if j["action"] != "init"]
-    equity = pd.Series([j["equity"] for j in marks],
-                       index=pd.to_datetime([j["date"] for j in marks]))
     rets = equity.pct_change().dropna()
     start_equity = float(journal[0]["equity"])
     total_cost = sum(float(j.get("cost") or 0.0) for j in journal)
@@ -318,10 +324,11 @@ def _report() -> int:
     print(f"  交易日數        {len(marks)}")
     print(f"  起始／現在權益   ${start_equity:,.0f} -> ${equity.iloc[-1]:,.0f}"
           f"   （{equity.iloc[-1] / start_equity - 1:+.2%}）")
+    drawdown, profit_factor = _max_dd(rets), _profit_factor(rets)
     if len(rets) > 2:
         print(f"  Sharpe（年化）   {_sharpe(rets):.2f}")
-        print(f"  獲利因子         {_profit_factor(rets):.2f}")
-        print(f"  最大回撤         {_max_dd(equity.pct_change().dropna()):.1%}")
+        print(f"  獲利因子         {profit_factor:.2f}")
+        print(f"  最大回撤         {drawdown:.1%}")
         print(f"  實現波動         "
               f"{rets.std(ddof=1) * np.sqrt(TRADING_DAYS):.1%} 年化")
     print(f"  再平衡次數       {n_rebal}")
@@ -336,8 +343,7 @@ def _report() -> int:
               f"這個長度下離散度遠大於訊號，")
         print(f"  兩個方向都不給結論——好看不算驗證，難看也不算否證。")
     else:
-        dd = _max_dd(equity.pct_change().dropna())
-        pf = _profit_factor(rets)
+        dd, pf = drawdown, profit_factor
         if dd < -0.30 or pf < 1.0:
             print(f"  觸及事先寫定的否證條件（回撤劣於 -30% 或獲利因子 < 1.0）。")
         else:

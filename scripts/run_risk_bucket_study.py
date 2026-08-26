@@ -205,6 +205,23 @@ def main() -> int:
         for name in ARMS:
             print(f"走進式 {name} ...")
             payload.setdefault("wfo", {})[name] = run_wfo(panel, bucket_of, name)
+        payload["wfo_measured_at"] = payload["run_at"]
+        payload["wfo_window"] = payload["window"]
+    elif OUT_JSON.exists():
+        # A run without --wfo used to overwrite the file and delete the recorded
+        # walk-forward results, leaving the in-sample `arms` table as the only
+        # thing in it -- while paper_track_v1.BACKTEST still cited this file for
+        # an out-of-sample benchmark. Carry the old section forward, stamped
+        # with the window it was actually measured on so staleness is visible.
+        prior = json.loads(OUT_JSON.read_text(encoding="utf-8"))
+        if "wfo" in prior:
+            payload["wfo"] = prior["wfo"]
+            payload["wfo_measured_at"] = prior.get("wfo_measured_at")
+            payload["wfo_window"] = prior.get("wfo_window")
+            payload["wfo_is_stale"] = prior.get("wfo_window") != payload["window"]
+            if payload["wfo_is_stale"]:
+                print(f"  注意：沿用 {payload['wfo_measured_at']} 的走進式結果，"
+                      f"但視窗已變動。要更新請加 --wfo。")
 
     OUT_JSON.parent.mkdir(parents=True, exist_ok=True)
     OUT_JSON.write_text(json.dumps(payload, indent=2, ensure_ascii=False) + "\n",

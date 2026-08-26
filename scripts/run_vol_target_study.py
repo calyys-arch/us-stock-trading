@@ -101,11 +101,20 @@ def exposure_path(gross: pd.Series, target_vol: float) -> pd.Series:
 
 
 def apply_exposure(gross: pd.Series, exposure: pd.Series) -> pd.Series:
-    """Net returns after scaling, charging one-way costs on exposure changes."""
+    """Net returns after scaling, charging one-way costs on exposure changes.
+
+    The first day is charged against a starting exposure of zero. `diff()`
+    leaves it NaN, and filling that with 0.0 handed the run its entire opening
+    position for free -- a one-off of about 4bps on ~0.9 exposure. Small, but
+    it is the one trade guaranteed to happen.
+    """
     exp = exposure.reindex(gross.index)
     valid = exp.notna()
     gross, exp = gross[valid], exp[valid]
-    turnover = exp.diff().abs().fillna(0.0)
+    turnover = exp.diff()
+    if len(turnover):
+        turnover.iloc[0] = exp.iloc[0]
+    turnover = turnover.abs().fillna(0.0)
     cost = turnover * (ONE_WAY_COST_BPS / 10_000.0)
     return (exp * gross - cost).dropna()
 
@@ -216,7 +225,11 @@ def apply_exposure_scaled(gross: pd.Series, exposure: pd.Series,
     exp = exposure.reindex(gross.index)
     valid = exp.notna()
     gross, exp = gross[valid], exp[valid]
-    turnover = exp.diff().abs().fillna(0.0)
+    # Same opening-position charge as apply_exposure; see the note there.
+    turnover = exp.diff()
+    if len(turnover):
+        turnover.iloc[0] = exp.iloc[0]
+    turnover = turnover.abs().fillna(0.0)
     cost = turnover * (ONE_WAY_COST_BPS * cost_multiplier / 10_000.0)
     return (exp * gross - cost).dropna()
 

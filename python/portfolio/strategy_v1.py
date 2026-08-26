@@ -91,6 +91,14 @@ def bucket_returns(panel: pd.DataFrame, bucket_of: dict[str, str]
 
     Weights come from the prior close via `shift(1)`, so a name entering the
     panel is not credited with the return of the day it appeared.
+
+    A bucket with nothing to price on a given day yields NaN, not 0.0.
+    `DataFrame.sum(axis=1)` defaults to skipna=True, so an all-NaN row silently
+    became a day of exactly zero return -- which then scored as a real
+    observation. On this panel that was one spurious day out of 2,069, but it is
+    the same silent-zero failure that made a 200-day average read 0/25 positive
+    folds elsewhere in this repo, and it would understate exposure badly if a
+    whole bucket ever went dark while its weight stayed at 25%.
     """
     rets = panel.pct_change(fill_method=None)
     hold = panel.notna().astype(float).shift(1).fillna(0.0)
@@ -103,7 +111,9 @@ def bucket_returns(panel: pd.DataFrame, bucket_of: dict[str, str]
         h = hold[cols]
         n = h.sum(axis=1)
         w = h.div(n.where(n > 0), axis=0).fillna(0.0)
-        out[bucket] = (w * rets[cols]).sum(axis=1)
+        contributions = w * rets[cols]
+        priced = (w > 0) & rets[cols].notna()
+        out[bucket] = contributions.sum(axis=1).where(priced.any(axis=1))
     return pd.DataFrame(out)
 
 
@@ -145,7 +155,9 @@ def bucket_weighted_gross(panel: pd.DataFrame, bucket_of: dict[str, str],
         inv = 1.0 / vol.where(vol > 0)
         weights = banded(inv.div(inv.sum(axis=1), axis=0), band)
 
-    combined = (weights * buckets).sum(axis=1)
+    # Any unpriced bucket makes the whole day unusable rather than quietly
+    # contributing zero to a still-fully-weighted portfolio.
+    combined = (weights * buckets).sum(axis=1).where(buckets.notna().all(axis=1))
     turnover = weights.diff().abs().sum(axis=1).fillna(0.0)
     net = combined - turnover * (one_way_cost_bps / 10_000.0)
     valid = weights.notna().all(axis=1)

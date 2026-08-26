@@ -13,7 +13,8 @@ import pandas as pd
 import pytest
 
 from python.portfolio.strategy_v1 import (
-    BUCKETS, COLLAPSE, bucket_weighted_gross, load_universe, target_weights,
+    BUCKETS, COLLAPSE, bucket_returns, bucket_weighted_gross, load_universe,
+    target_weights,
 )
 
 # Deliberately lopsided: 4 US equity names against 1 of everything else, the
@@ -90,6 +91,35 @@ def test_inverse_vol_scheme_overweights_the_calm_bucket():
     assert mean["bonds"] > 0.5, "low-vol bucket should dominate under inverse vol"
     assert mean["bonds"] > mean["commodities"]
     assert mean.sum() == pytest.approx(1.0)
+
+
+def test_an_unpriced_bucket_yields_nan_not_a_free_zero_return():
+    """`sum(axis=1)` skips NaN, so an all-NaN row used to score as 0.0%.
+
+    That is a real observation to every downstream statistic, and it understates
+    exposure: the bucket contributes nothing while its weight stays at 25%.
+    """
+    panel, bucket_of = _panel()
+    # Blank the whole bonds bucket for a stretch after the warmup.
+    dark = panel.index[200:210]
+    panel.loc[dark, "FFF"] = np.nan
+
+    buckets = bucket_returns(panel, bucket_of)
+    assert buckets.loc[dark, "bonds"].isna().all()
+
+    net, _ = bucket_weighted_gross(panel, bucket_of, "equal", 60, 0.10, 4.0)
+    assert not net.index.intersection(dark).size, \
+        "days with a dark bucket must be dropped, not counted as zero"
+
+
+def test_the_first_day_of_a_panel_is_dropped_rather_than_scored_as_zero():
+    panel, bucket_of = _panel()
+    buckets = bucket_returns(panel, bucket_of)
+    # pct_change has nothing to difference against on row zero.
+    assert buckets.iloc[0].isna().all()
+    net, _ = bucket_weighted_gross(panel, bucket_of, "equal", 60, 0.10, 4.0)
+    assert panel.index[0] not in net.index
+    assert not (net == 0.0).any(), "no exactly-zero days should survive"
 
 
 def test_bucket_allocation_never_peeks_at_the_day_it_sizes():
