@@ -74,6 +74,10 @@ BACKTEST = {"sharpe": 0.91, "profit_factor": 1.17, "max_drawdown": -0.246,
             "key": "wfo.bucket_equal"}
 # Below this many days, dispersion swamps any signal and no verdict is offered.
 MIN_DAYS_FOR_VERDICT = 250
+# How long a missing price may be carried forward before the run stops. The
+# universe is frozen and liquid, so a gap this long is a data fault, not a
+# delisting, and marking off a week-old price is not defensible.
+MAX_CARRY_DAYS = 5
 
 
 def _short(path: Path) -> str:
@@ -98,10 +102,42 @@ def _read() -> list[dict]:
             if line.strip()]
 
 
+def _marks(upto: pd.DataFrame, day: pd.Timestamp
+           ) -> tuple[pd.Series, dict[str, int]]:
+    """Last known close for every symbol, plus how stale each one is.
+
+    `load_prices` does no forward-fill, so a symbol whose vendor fetch lagged by
+    a day is NaN on that row while the other 119 are not. Valuing off the raw
+    row dropped those names from the sum entirely -- marking them at ZERO, not
+    at their last close. One commodity name is 2.5% of this book, so a single
+    failed fetch printed a phantom 2.5% loss that reversed the next day; and if
+    the rebalance band tripped on that day, the book was resized against the
+    understated equity and real shares were sold to match a fake number.
+    """
+    carried = upto.ffill().loc[day]
+    row = upto.loc[day]
+    position = int(upto.index.get_indexer([day])[0])
+    age: dict[str, int] = {}
+    for symbol in upto.columns:
+        if pd.notna(row.get(symbol)):
+            continue
+        last_seen = upto[symbol].last_valid_index()
+        age[symbol] = (position + 1 if last_seen is None
+                       else position - int(upto.index.get_indexer([last_seen])[0]))
+    return carried, age
+
+
 def _equity(holdings: dict[str, float], prices: pd.Series, cash: float
             ) -> tuple[float, float]:
-    invested = sum(sh * float(prices[s]) for s, sh in holdings.items()
-                   if s in prices.index and np.isfinite(prices[s]))
+    """Value the book. Every held name must have a mark; there is no honest way
+    to value one at zero, so this refuses rather than inventing a loss."""
+    unmarked = [s for s in holdings
+                if s not in prices.index or not np.isfinite(prices[s])]
+    if unmarked:
+        raise ValueError(
+            f"沒有可用價格卻持有：{', '.join(sorted(unmarked))}。"
+            f"估值為零會憑空造出虧損，所以這裡拒絕結算。")
+    invested = sum(sh * float(prices[s]) for s, sh in holdings.items())
     return cash + invested, invested
 
 
@@ -183,7 +219,13 @@ def _top_up() -> None:
 
     symbols, _ = load_universe()
     print("更新價格 ...", flush=True)
-    result = top_up_cached_panel(symbols, pd.Timestamp.today().normalize())
+    # Ask only for closes through YESTERDAY. Requesting today returns a partial
+    # intraday bar if this runs while the US market is open, and the ledger would
+    # mark -- and possibly trade -- against it. Re-running later is a no-op
+    # because the day is no longer pending, so that intraday print would be
+    # frozen into an append-only journal as if it were a close.
+    result = top_up_cached_panel(
+        symbols, pd.Timestamp.today().normalize() - pd.Timedelta(days=1))
     parts = [f"{len(result['topped_up'])} 檔延伸",
              f"{len(result['already_current'])} 檔已最新"]
     if result["readjusted"]:
@@ -197,7 +239,8 @@ def _top_up() -> None:
         print(f"  重抓：{', '.join(result['readjusted'])}")
     if result["failed"]:
         print(f"  !! 失敗：{', '.join(result['failed'])}"
-              f" — 這些標的會用舊價格結算")
+              f" — 持有中的會延用最後已知收盤價，超過 "
+              f"{MAX_CARRY_DAYS} 個交易日就停止推進")
     print()
 
 
@@ -249,7 +292,23 @@ def _run(args: argparse.Namespace) -> int:
 
     for day in pending:
         upto = panel.loc[:day]
-        prices = upto.loc[day]
+        prices, stale = _marks(upto, day)
+        too_stale = {s: n for s, n in stale.items()
+                     if n > MAX_CARRY_DAYS and (s in holdings or n <= len(upto))}
+        held_too_stale = {s: n for s, n in too_stale.items() if s in holdings}
+        if held_too_stale:
+            # Stop rather than write a mark nobody can defend. The journal is
+            # append-only, so a bad row is permanent.
+            print(f"  {day.date()}  停在這裡：{', '.join(sorted(held_too_stale))} "
+                  f"已超過 {MAX_CARRY_DAYS} 個交易日沒有新價格。")
+            print(f"  先修好價格資料再跑，不要讓一筆無法辯護的紀錄永久寫進帳本。")
+            break
+        if stale:
+            carried = {s: n for s, n in stale.items() if s in holdings}
+            if carried:
+                print(f"  {day.date()}  延用舊價：" + "，".join(
+                    f"{s}（{n} 日前）" for s, n in sorted(carried.items())))
+
         gross, _ = bucket_weighted_gross(upto, bucket_of, "equal",
                                          VOL_LOOKBACK, REBALANCE_BAND,
                                          ONE_WAY_COST_BPS)
@@ -343,11 +402,25 @@ def _report() -> int:
               f"這個長度下離散度遠大於訊號，")
         print(f"  兩個方向都不給結論——好看不算驗證，難看也不算否證。")
     else:
-        dd, pf = drawdown, profit_factor
-        if dd < -0.30 or pf < 1.0:
-            print(f"  觸及事先寫定的否證條件（回撤劣於 -30% 或獲利因子 < 1.0）。")
+        # "Profit factor below 1.0" used to sit here as if it were a second,
+        # independent condition. On a daily return series it is not: PF >= 1 is
+        # algebraically identical to sum(returns) >= 0, so it only restated
+        # "the account is down". Replaced with a test that has its own content
+        # -- realized Sharpe far enough below the walk-forward's 0.91 that the
+        # gap is unlikely to be dispersion at this sample length.
+        dd = drawdown
+        realized_sharpe = _sharpe(rets)
+        breached = []
+        if dd < -0.30:
+            breached.append(f"回撤 {dd:.1%} 劣於 -30%")
+        if realized_sharpe < 0.0:
+            breached.append(f"實現 Sharpe {realized_sharpe:.2f} 為負，"
+                            f"回測為 {BACKTEST['sharpe']}")
+        if breached:
+            print(f"  觸及事先寫定的否證條件：{'；'.join(breached)}。")
         else:
-            print(f"  仍在事先寫定的否證條件之內。")
+            print(f"  仍在事先寫定的否證條件之內"
+                  f"（實現 Sharpe {realized_sharpe:.2f}，回撤 {dd:.1%}）。")
     return 0
 
 

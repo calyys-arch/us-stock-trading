@@ -105,9 +105,17 @@ def min_positive_folds(n_folds: int, alpha: float) -> int:
 
 @dataclass
 class WFOConfig:
-    is_days: int = 504     # ~2 trading years in-sample
-    oos_days: int = 126    # ~6 trading months out-of-sample
-    step_days: int = 126
+    # CALENDAR days, not trading days: `run()` advances with
+    # `timedelta(days=...)`. On a US equity calendar these land ~31% shorter
+    # than the trading-day reading the old comments invited -- measured on the
+    # Strategy V1 panel, 504 gives 348 trading days (1.4 years, not 2) and 126
+    # gives ~86 (~4 trading months, not 6). Nothing downstream is corrupted by
+    # this; the in-sample estimate each parameter is chosen on is just weaker
+    # than advertised. Left as-is because every published result was measured
+    # under these values, and changing them silently invalidates all of them.
+    is_days: int = 504     # ~1.4 trading years in-sample
+    oos_days: int = 126    # ~86 trading days out-of-sample
+    step_days: int = 126   # equal to oos_days: contiguous, non-overlapping OOS
     min_pass_folds_ratio: float = 0.60
     min_oos_sharpe_abs: float = 0.0
     max_sharpe_decay: float = 0.5   # OOS sharpe must be >= IS sharpe * (1 - max_sharpe_decay)

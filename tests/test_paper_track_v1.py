@@ -253,3 +253,56 @@ def test_the_quoted_backtest_benchmark_still_matches_its_source():
         BACKTEST["profit_factor"], abs=0.005)
     assert wfo["oos_max_drawdown"] == pytest.approx(
         BACKTEST["max_drawdown"], abs=0.0005)
+
+
+def test_an_unpriced_holding_is_carried_not_marked_at_zero(ledger, monkeypatch, capsys):
+    """The defect that could have sold real shares against a fake equity number.
+
+    `_equity` skipped any holding without a finite price, which values it at
+    zero rather than at its last close. One commodity name is 2.5% of the book,
+    so a single failed vendor fetch printed a phantom 2.5% loss that reversed
+    the next day -- and if the band tripped on that day the whole book was
+    resized against the understated equity.
+    """
+    monkeypatch.setattr(pt, "load_prices", lambda s: ledger.iloc[:300])
+    pt._run(_args(init=True))
+
+    # CMD is the only commodity name, so bucket weighting gives it 25% of the
+    # book on its own -- the largest single mark this panel can lose.
+    blanked = ledger.copy()
+    gap = blanked.index[301]
+    blanked.loc[gap, "CMD"] = np.nan
+    monkeypatch.setattr(pt, "load_prices", lambda s: blanked.iloc[:303])
+    pt._run(_args())
+    capsys.readouterr()
+
+    rows = [r for r in _entries() if r["action"] != "init"]
+    on_gap = next(r for r in rows if r["date"] == str(gap.date()))
+    prior = max((r for r in rows if r["date"] < str(gap.date())),
+                key=lambda r: r["date"])
+    move = on_gap["equity"] / prior["equity"] - 1
+    assert abs(move) < 0.05, \
+        f"a carried mark cannot move equity by {move:.2%} on one missing price"
+
+
+def test_equity_refuses_to_value_a_holding_it_has_no_mark_for():
+    prices = pd.Series({s: 100.0 for s in UNIVERSE if s != "CMD"})
+    with pytest.raises(ValueError, match="沒有可用價格卻持有"):
+        pt._equity({"CMD": 10.0}, prices, 0.0)
+
+
+def test_the_run_stops_rather_than_writing_a_mark_it_cannot_defend(
+        ledger, monkeypatch, capsys):
+    monkeypatch.setattr(pt, "load_prices", lambda s: ledger.iloc[:300])
+    pt._run(_args(init=True))
+
+    blanked = ledger.copy()
+    blanked.loc[blanked.index[301]:, "CMD"] = np.nan
+    monkeypatch.setattr(pt, "load_prices", lambda s: blanked.iloc[:320])
+    pt._run(_args())
+    out = capsys.readouterr().out
+
+    assert "停在這裡" in out
+    dates = [r["date"] for r in _entries()]
+    # Advanced up to the carry limit, then stopped instead of guessing.
+    assert str(blanked.index[301 + pt.MAX_CARRY_DAYS].date()) not in dates

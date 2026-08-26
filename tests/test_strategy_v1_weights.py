@@ -133,3 +133,45 @@ def test_bucket_allocation_never_peeks_at_the_day_it_sizes():
     _, after = bucket_weighted_gross(spiked, bucket_of, "rp", 60, 0.10, 4.0)
     stamp = panel.index[day]
     assert after.loc[stamp].to_numpy() == pytest.approx(base.loc[stamp].to_numpy())
+
+
+def test_dropping_unpriced_names_keeps_every_bucket_at_its_target_share():
+    """The order sheet's fix for silently parking money in cash.
+
+    It used to skip a name it had no price for and leave that name's share
+    uninvested, then print the hole as "integer rounding" -- a cause that
+    cannot produce it under --fractional. Re-deriving the weights over the
+    priced subset keeps the four buckets at 25% each, which is the whole point
+    of the scheme.
+    """
+    symbols, bucket_of = load_universe()
+    full = target_weights(symbols, bucket_of, "bucket")
+    assert sum(full.values()) == pytest.approx(1.0)
+
+    commodities = [s for s in symbols if COLLAPSE[bucket_of[s]] == "commodities"]
+    priceable = [s for s in symbols if s not in commodities[:3]]
+    subset = target_weights(priceable, bucket_of, "bucket")
+
+    assert sum(subset.values()) == pytest.approx(1.0), \
+        "weights must still be fully invested after a drop"
+    by_bucket: dict[str, float] = {}
+    for symbol, weight in subset.items():
+        key = COLLAPSE[bucket_of[symbol]]
+        by_bucket[key] = by_bucket.get(key, 0.0) + weight
+    for bucket, share in by_bucket.items():
+        assert share == pytest.approx(0.25), f"{bucket} drifted to {share:.3f}"
+
+
+def test_losing_a_whole_bucket_spreads_it_over_the_survivors():
+    symbols, bucket_of = load_universe()
+    survivors = [s for s in symbols
+                 if COLLAPSE[bucket_of[s]] != "commodities"]
+    weights = target_weights(survivors, bucket_of, "bucket")
+    assert sum(weights.values()) == pytest.approx(1.0)
+    by_bucket: dict[str, float] = {}
+    for symbol, weight in weights.items():
+        key = COLLAPSE[bucket_of[symbol]]
+        by_bucket[key] = by_bucket.get(key, 0.0) + weight
+    assert set(by_bucket) == {"us_equity", "intl_equity", "bonds"}
+    for share in by_bucket.values():
+        assert share == pytest.approx(1 / 3)

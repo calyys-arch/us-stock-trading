@@ -99,10 +99,12 @@ def _score(net: pd.Series, sims: int, mean_exposure: float) -> dict:
     }
 
 
-def _braked(gross: pd.Series, target_vol: float) -> tuple[pd.Series, float]:
+def _braked(gross: pd.Series, target_vol: float
+            ) -> tuple[pd.Series, float, pd.Series]:
     exp = exposure_path(gross, target_vol)
     net = apply_exposure(gross, exp)
-    return net, float(exp.reindex(net.index).mean())
+    aligned = exp.reindex(net.index)
+    return net, float(aligned.mean()), aligned
 
 
 def run_wfo(panel: pd.DataFrame, bucket_of: dict[str, str], arm: str) -> dict:
@@ -128,7 +130,15 @@ def run_wfo(panel: pd.DataFrame, bucket_of: dict[str, str], arm: str) -> dict:
         rebalances = int((exp.reindex(net.index).diff().abs() > 1e-12).sum())
         return {
             "sharpe_ratio": _sharpe(net),
-            "n_trades": max(rebalances, 1),
+            # `n_trades` gates FoldResult.is_evaluable, whose question is "did
+            # this fold produce an observation". For a vol-targeted basket the
+            # answer is the number of days held, not the number of exposure
+            # changes: a fold that sat at exposure 1.0 the whole quarter still
+            # earned the basket's return. Clamping exposure changes to max(n, 1)
+            # answered it the wrong way twice -- it made the guard vacuous, and
+            # it fed a rebalance count of 1 to gates that report turnover.
+            "n_trades": int(len(net)),
+            "exposure_changes": rebalances,
             "total_net_pnl": float(net.sum()),
             "profit_factor": _profit_factor(net),
             "max_drawdown": _max_dd(net),
@@ -190,10 +200,15 @@ def main() -> int:
     }
 
     for name in ARMS:
-        net, mean_exp = _braked(gross_by_arm[name], TARGET_VOL)
+        net, mean_exp, exposure = _braked(gross_by_arm[name], TARGET_VOL)
         payload["arms"][name] = _score(net, args.sims, mean_exp)
         hold = net.loc[net.index >= HOLDOUT_START]
-        payload["holdout"][name] = _score(hold, args.sims, mean_exp) \
+        # Re-measure exposure on the holdout slice. Passing the full-sample
+        # `mean_exp` made every holdout row report the 1,948-day average, which
+        # showed up as a mean_exposure byte-identical to the full-window arm.
+        hold_exp = float(exposure.reindex(hold.index).mean()) \
+            if len(hold) else float("nan")
+        payload["holdout"][name] = _score(hold, args.sims, hold_exp) \
             if len(hold) > 60 else None
 
     latest = weights.dropna().iloc[-1]

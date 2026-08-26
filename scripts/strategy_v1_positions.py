@@ -33,7 +33,24 @@ walk-forward out-of-sample days (backtests/reports/risk_bucket_study.json):
     buckets @ inverse vol  0.75  1.15   -19.2%           15/19
 
 Bucketing costs nothing in Sharpe and buys 6.8 points of drawdown, and it is the
-only arm whose out-of-sample drawdown stays inside the -25% limit. Inverse-
+only arm whose drawdown stays inside the -25% limit.
+
+READ THAT TABLE WITH TWO CAVEATS, both measured rather than suspected.
+
+  The drawdown column is not independent of the full-window number quoted
+      below. The pooled walk-forward drawdown and the fixed-15%-target
+      full-window drawdown are both -0.24597529605973933 -- identical to every
+      digit, both troughing on 2020-03-18. They are one measurement printed
+      twice, so the walk-forward adds no independent support to the -24.6%
+      claim, which is the claim the bucketing decision rests on.
+  The walk-forward validates a policy nobody runs. It re-picks the target each
+      fold (0.15 ten times, 0.20 once, 0.25 eight times) while the shipped rule
+      is a fixed 15%. Numerically the gap is small -- pooled 0.907 against
+      full-sample 0.911 -- because any target at or above 0.20 just pins
+      exposure at the 1.0 cap, which is also exactly why the two drawdowns
+      collapse onto the same number.
+
+Inverse-
 volatility weighting cuts drawdown further but is not worth it here: with no
 leverage allowed it parks 55% of the book in bonds, runs at 9.6% realized vol
 against a 15% target, and halves the return to reach it.
@@ -82,11 +99,29 @@ point-in-time 2016 S&P 500 list was 6 of 25 names over ten years, and the
 names that vanish are acquisitions and failures. Expect live results below the
 backtest for this reason alone.
 
-TURNOVER AND COST. Bucket weights are fixed, so constituents only trade when
-the frozen list changes; exposure only trades when the band trips. That was
-tens of round trips per year across the whole book, so cost is a rounding
-error against a multi-week holding period -- unlike the intraday work in this
-repo, where cost per trade ran 5 to 100 times the edge per trade.
+TURNOVER AND COST, and why the cost stress test is weak evidence. Bucket
+weights are fixed, so constituents only trade when the frozen list changes;
+exposure only trades when the band trips. Measured: 30 exposure changes in
+eight years, about 4 a year, total charged turnover 3.2x the book, roughly
+13bps over the whole sample. Cost really is a rounding error here -- unlike the
+intraday work in this repo, where cost per trade ran 5 to 100 times the edge.
+
+But that is also why `stress_slippage_1.5x_pf_ge_1: true` proves almost
+nothing. Multiplying 13bps by 1.5 moves pooled Sharpe by 0.0005. The gate
+passing means nearly nothing was charged, not that the edge survives costs. And
+the larger real cost is charged at zero: the backtest re-weights to
+equal-within-bucket every day for free, which is 0.5% one-way turnover a day, or
+about 5bps a year -- three times the only cost it does charge. That omission is
+small enough not to matter (about 0.004 of Sharpe) but it is the bigger of the
+two, and the ledger pays it monthly rather than pretending it is free.
+
+WHAT THE 16-OF-19 FOLD COUNT ACTUALLY TESTS. In 14 of the 19 out-of-sample
+folds, exposure sat pinned at 1.00 for the entire window and the brake never
+moved. That is the design working -- a vol target capped at 1.0 is correctly
+inert whenever realized vol is under target -- but it means the fold breadth is
+overwhelmingly a statement about the bucketed basket, not about the sizing rule.
+The brake is exercised in 5 folds, and those are the ones that matter (2020,
+2022): fold 1 ran exposure down to 0.33.
 """
 from __future__ import annotations
 
@@ -202,8 +237,15 @@ def main() -> int:
             f"不動作：目標 {want:.2f} 與現有 {holding:.2f} 差距未超過 "
             f"{REBALANCE_BAND:.0%} 再平衡帶")
 
-    weights = target_weights(held, bucket_of, args.weights)
-    prices = panel.loc[as_of]
+    # Size only what can be priced, but re-derive the weights over that subset
+    # so the four buckets still sit at 25% each. The sizing loop used to skip an
+    # unpriced name and leave its share of the book in cash, then report the hole
+    # as "integer rounding" -- a cause that cannot produce it under --fractional.
+    # Three missing commodity prices silently took that bucket to 18.9%.
+    prices = panel.ffill().loc[as_of]
+    priceable = [s for s in held if float(prices.get(s, float("nan"))) > 0]
+    unpriceable = sorted(set(held) - set(priceable))
+    weights = target_weights(priceable, bucket_of, args.weights)
 
     scheme_label = ("四桶各 25%（等權於桶內）" if args.weights == "bucket"
                     else "全部標的等權（第一版）")
@@ -223,12 +265,13 @@ def main() -> int:
     if stale:
         print(f"\n  !! {len(stale)} 檔價格超過 {MAX_STALE_DAYS} 個交易日未更新，"
               f"股數會用舊價算：{stale[:12]}")
+    if unpriceable:
+        print(f"\n  !! {len(unpriceable)} 檔完全沒有價格，已從本次配置剔除，"
+              f"權重在其餘標的上重新歸一（桶配比維持 25%）：{unpriceable[:12]}")
 
     rows = []
-    for symbol in sorted(held):
-        price = float(prices.get(symbol, float("nan")))
-        if not price > 0:
-            continue
+    for symbol in sorted(priceable):
+        price = float(prices[symbol])
         dollars = args.capital * exposure * weights[symbol]
         shares = round(dollars / price, 4) if args.fractional \
             else float(int(dollars / price))
@@ -247,8 +290,10 @@ def main() -> int:
     drag = (target - invested) / target if target else 0.0
     print("-" * 50)
     print(f"{'合計':<21}{'':>9}{'':>9}{invested:>11,.0f}")
-    print(f"  目標投入 ${target:,.0f}，實際 ${invested:,.0f}，"
-          f"取整缺口 {drag:.1%}")
+    label = "取整缺口" if args.fractional is False else "缺口"
+    print(f"  目標投入 ${target:,.0f}，實際 ${invested:,.0f}，{label} {drag:.1%}"
+          + ("（整股取整所致）" if not args.fractional else
+             "（零股模式下應為 0；非零表示還有其他原因）"))
 
     by_bucket: dict[str, float] = {}
     for _, bucket, _, _, value in rows:
@@ -259,7 +304,7 @@ def main() -> int:
         print(f"  {bucket:<14}${value:>10,.0f}   佔投入 {share:>6.1%}"
               f"   佔帳戶 {value / args.capital:>6.1%}")
 
-    skipped = len(held) - len(rows)
+    skipped = len(priceable) - len(rows)
     if not args.fractional and (skipped or drag > 0.02):
         need = _capital_for_drag(weights, prices, exposure, 0.02)
         print(f"\n  整股取整讓實際配置偏離目標 {drag:.1%}"

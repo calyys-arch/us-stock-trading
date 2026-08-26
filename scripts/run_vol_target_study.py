@@ -71,12 +71,19 @@ def gross_returns(panel: pd.DataFrame) -> pd.Series:
 
     Weights are decided from the prior close (`shift(1)`), so a name entering
     the panel is not credited with the return of the day it appeared.
+
+    A day on which nothing held can be priced yields NaN and is dropped, not
+    scored as 0.0%. `.sum(axis=1)` skips NaN, so `.dropna()` alone never saw
+    those days. Dormant on the current panel, but not on a survivorship-free
+    one: a delisted name's series terminates exactly this way, and the
+    delisting loss would be booked as a flat day at full weight.
     """
     rets = panel.pct_change(fill_method=None)
     hold = panel.notna().astype(float).shift(1).fillna(0.0)
     n = hold.sum(axis=1)
     weights = hold.div(n.where(n > 0), axis=0).fillna(0.0)
-    return (weights * rets).sum(axis=1).dropna()
+    priced = (weights > 0) & rets.notna()
+    return (weights * rets).sum(axis=1).where(priced.any(axis=1)).dropna()
 
 
 def exposure_path(gross: pd.Series, target_vol: float) -> pd.Series:
@@ -175,7 +182,12 @@ def run_vol_target_wfo(panel: pd.DataFrame, cost_multiplier: float = 1.0,
         rebalances = int((exp.reindex(net.index).diff().abs() > 1e-12).sum())
         return {
             "sharpe_ratio": _sharpe(net),
-            "n_trades": max(rebalances, 1),
+            # Days held, not exposure changes -- see the note in
+            # run_risk_bucket_study.run_wfo. max(rebalances, 1) made
+            # `has_oos_trades` read `1 > 0` and never fail, then reported it as
+            # though it had been tested.
+            "n_trades": int(len(net)),
+            "exposure_changes": rebalances,
             "total_net_pnl": float(net.sum()),
             "profit_factor": _profit_factor(net),
             "max_drawdown": _max_dd(net),
@@ -202,7 +214,7 @@ def run_vol_target_wfo(panel: pd.DataFrame, cost_multiplier: float = 1.0,
             continue
         oos_returns.extend((f.oos_metrics or {}).get("daily_returns") or [])
         oos_dds.append(float((f.oos_metrics or {}).get("max_drawdown") or 0.0))
-        oos_trades.append(int((f.oos_metrics or {}).get("n_trades") or 0))
+        oos_trades.append(int((f.oos_metrics or {}).get("exposure_changes") or 0))
     pooled = pd.Series(oos_returns)
     return {
         "decision": result.decision,
@@ -215,7 +227,9 @@ def run_vol_target_wfo(panel: pd.DataFrame, cost_multiplier: float = 1.0,
         "pooled_oos_sharpe": _sharpe(pooled) if len(pooled) > 1 else 0.0,
         "pooled_oos_profit_factor": _profit_factor(pooled) if len(pooled) else 0.0,
         "worst_fold_drawdown": min(oos_dds) if oos_dds else 0.0,
-        "min_trades_in_a_fold": min(oos_trades) if oos_trades else 0,
+        "min_exposure_changes_in_a_fold": min(oos_trades) if oos_trades else 0,
+        "total_exposure_changes": sum(oos_trades),
+        "folds_where_brake_acted": sum(1 for n in oos_trades if n > 0),
         "pooled_oos_days": int(len(pooled)),
     }
 
@@ -513,14 +527,34 @@ def main() -> int:
             panel, cost_multiplier=1.5,
             selection_objective="sharpe_subject_to_drawdown")
         print("\n=== 修正後的完整閘門 ===", flush=True)
+        # Two former gates are gone, because neither tested what its name said.
+        #
+        # `has_oos_trades` read `max(rebalances, 1) > 0` and could never be
+        # false; it was reported as `true` as though it had been checked. The
+        # real count is 0 in 14 of 19 folds, because a brake capped at 1.0 is
+        # correctly inert whenever realized vol sits under target. That is the
+        # design working, not a failure, so it is a diagnostic below rather than
+        # a pass/fail line -- and `min_trades_per_oos_fold >= 40` was a
+        # sample-size rule borrowed from intraday work where each trade is an
+        # observation. Here the observations are days held, which is what
+        # `n_trades` now reports and what `is_evaluable` needs.
         gates = {
             "wfo_go": wfo["decision"] == "GO",
-            "has_oos_trades": wfo["min_trades_in_a_fold"] > 0,
-            "min_trades_per_oos_fold": wfo["min_trades_in_a_fold"] >= 40,
             "oos_drawdown_within_limit": wfo["worst_fold_drawdown"] >= MAX_DD_LIMIT,
             "cost_adjusted_profit_factor": wfo["pooled_oos_profit_factor"] >= 1.0,
             "stress_slippage_1.5x_pf_ge_1": stress["pooled_oos_profit_factor"] >= 1.0,
         }
+        # The stress gate above is weak evidence and should be read as such: the
+        # only cost this backtest charges is exposure turnover, and there are ~4
+        # exposure changes a year, so lifetime cost is about 13bps. Multiplying
+        # near-nothing by 1.5 moves pooled Sharpe by ~0.0005. It passing says
+        # almost nothing was charged, not that the edge survives costs.
+        diagnostics = {
+            "folds_where_brake_acted": wfo["folds_where_brake_acted"],
+            "evaluable_folds": wfo["evaluable_folds"],
+            "total_exposure_changes": wfo["total_exposure_changes"],
+        }
+        payload["gate_diagnostics"] = diagnostics
         print(f"   判決 {wfo['decision']}  "
               f"{wfo['positive_folds']}/{wfo['evaluable_folds']} 折為正"
               f"（需 {wfo['required_positive_folds']}）", flush=True)
@@ -528,8 +562,11 @@ def main() -> int:
         print(f"   彙總 OOS: {wfo['pooled_oos_days']} 日，Sharpe "
               f"{wfo['pooled_oos_sharpe']:.2f}，PF "
               f"{wfo['pooled_oos_profit_factor']:.2f}", flush=True)
-        print(f"   最差單折回撤 {wfo['worst_fold_drawdown']:.1%}；"
-              f"最少單折再平衡 {wfo['min_trades_in_a_fold']} 次", flush=True)
+        print(f"   最差單折回撤 {wfo['worst_fold_drawdown']:.1%}", flush=True)
+        print(f"   煞車實際動作的折數 {wfo['folds_where_brake_acted']}/"
+              f"{wfo['evaluable_folds']}，全期曝險變動 "
+              f"{wfo['total_exposure_changes']} 次"
+              f"（其餘折曝險釘在 1.0 上限，是設計如此）", flush=True)
         print(f"   1.5x 成本壓力 PF {stress['pooled_oos_profit_factor']:.2f} "
               f"(判決 {stress['decision']})", flush=True)
         for g, ok in gates.items():
