@@ -182,6 +182,18 @@ def main() -> int:
           f"{panel.index[-1].date()}\n")
 
     raw = {arm: gross_for_arm(panel, bucket_of, arm) for arm in ARMS}
+    # Score every arm on the same days, otherwise the comparison is between
+    # different periods. The inverse-vol arm needs a volatility estimate before
+    # it can weight anything, so this intersection costs the other two arms
+    # their first ~60 trading days.
+    #
+    # That makes each arm's headline contingent on which OTHER arms ran, which
+    # is not obvious from the output: on this panel `bucket_equal` reads 0.911
+    # aligned and 0.821 on its own natural window, because the Jun-Aug 2018
+    # stretch the alignment discards was a bad one. Aligning is still right for
+    # comparing arms, but "V1's Sharpe" is the own-window number, so both are
+    # reported below and the walk-forward -- which never sees this intersection
+    # -- remains the load-bearing figure.
     common = raw["equal_weight"][0].index
     for arm in ARMS:
         common = common.intersection(raw[arm][0].index)
@@ -210,6 +222,12 @@ def main() -> int:
             if len(hold) else float("nan")
         payload["holdout"][name] = _score(hold, args.sims, hold_exp) \
             if len(hold) > 60 else None
+
+        own, own_mean, _ = _braked(raw[name][0], TARGET_VOL)
+        payload.setdefault("arms_own_window", {})[name] = {
+            **_score(own, args.sims, own_mean),
+            "window": [str(own.index[0].date()), str(own.index[-1].date())],
+        }
 
     latest = weights.dropna().iloc[-1]
     payload["bucket_weights_recent"] = {k: float(v) for k, v in latest.items()}
@@ -254,6 +272,16 @@ def main() -> int:
                        ("平均曝險", "mean_exposure")):
         cells = "".join(f"{payload['arms'][a][key]:>14.3f}" for a in ARMS)
         print(f"  {label:<20}{cells}")
+
+    aligned = payload["arms"][ARMS[0]]
+    print(f"\n  以上是三個 arm 對齊到同一批 {aligned['n_days']} 天的結果"
+          f"（逆波動 arm 需要波動暖機，代價由另兩個 arm 一起付）。")
+    print("  各 arm 在自己的完整視窗上：")
+    for name in ARMS:
+        o = payload["arms_own_window"][name]
+        print(f"    {header[name]:<12} {o['n_days']:>4} 日（{o['window'][0]} 起）"
+              f"  Sharpe {o['sharpe_annualized']:>5.3f}"
+              f"  回撤 {o['max_drawdown']:>6.1%}")
 
     print("\n  桶權重：四桶各 25% 是固定的；逆波動的實際落點如下")
     for k, v in sorted(latest.items(), key=lambda kv: -kv[1]):

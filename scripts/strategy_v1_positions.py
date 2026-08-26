@@ -81,8 +81,16 @@ diversification_study.json, risk_bucket_study.json):
 
   2024-01..2026-08 at equal buckets: Sharpe 1.65, CAGR 22.7%, drawdown -11.9%,
       PF 1.34.
-  2018-06..2026-08 at a fixed 15% target, equal buckets: Sharpe 0.91,
-      CAGR 11.7%, drawdown -24.6%.
+  2018-11..2026-08 at a fixed 15% target, equal buckets: Sharpe 0.91,
+      CAGR 11.7%, drawdown -24.6% over 1,948 days. That start date is not a
+      choice: run_risk_bucket_study scores all three arms on the same days so
+      the comparison is honest, and the inverse-vol arm cannot weight anything
+      until it has a volatility estimate, so the other two arms pay its warmup.
+      On its own full window this arm reads 2,008 days from 2018-08-28 at
+      Sharpe 0.821 -- the aligned number is 0.09 higher only because the extra
+      ten weeks of mid-2018 it discards were a bad stretch. Neither is wrong,
+      but "V1's Sharpe" is the own-window 0.82, and the walk-forward 0.91 below
+      is the load-bearing figure since it never sees this intersection.
 
 TWO CLAIMS OF DIFFERENT QUALITY, which earlier drafts blurred together.
 
@@ -106,12 +114,41 @@ rather than merely holding less: a CONSTANT exposure at the same average still
 lost 38.8%, so about 9 points came from the brake reacting. But halving a 56%
 drawdown still leaves 30%.
 
-THE REMAINING KNOWN WEAKNESS. The universe is survivor-flattered.
-data/history was assembled from a 2026 liquidity snapshot, so every name in it
-is a name that still existed in 2026. Measured attrition on a true
-point-in-time 2016 S&P 500 list was 6 of 25 names over ten years, and the
-names that vanish are acquisitions and failures. Expect live results below the
-backtest for this reason alone.
+SURVIVORSHIP, NOW BOUNDED RATHER THAN FEARED
+(survivorship_exposure_study.json). The universe is survivor-flattered:
+data/history came from a 2026 liquidity snapshot, so every instrument in it is
+one that still existed in 2026. Earlier drafts stopped there and told you to
+expect less than the backtest. The size of that discount is now measured.
+
+  Only 16.3% of the book can fail. Single companies are 54 of the 120
+      instruments but sit entirely inside the US equity bucket, so bucket
+      weighting caps them at 16.3%. The other 83.7% is ETFs, which do close but
+      liquidate at NAV rather than printing -100%.
+  The 24% attrition figure is mostly ticker churn. Of the six 2016 S&P 500
+      names missing a decade later, ABC, ADS and ACE are renames or
+      continuations (Cencora, Bread Financial, Chubb) and ADT, AET and AGN were
+      acquired at a premium. None went bankrupt. Excluding a premium
+      acquisition makes a survivor-only backtest UNDERSTATE that name. The mode
+      that does inflate a backtest -- fall, get dropped from the index, then
+      delist -- is absent from that alphabetical sample and cannot be measured
+      here, because yfinance serves no partial history for a dead ticker.
+  So the exposure is priced by breakeven instead. Charging the single-name
+      sleeve a synthetic annual drag, shipped V1 stays ahead of the ETF-only
+      variant until the drag reaches 12% a year, which is 1.95% at the
+      portfolio level. Published estimates for survivor-only US equity
+      backtests run 1-4% a year; at 4% this reads Sharpe 0.774 against the
+      ETF-only arm's 0.700.
+  Wipeouts are bounded by arithmetic. Each single name is 0.30% of the book,
+      so five simultaneous total losses cost 1.5% and ten cost 3.0%.
+  And there is an escape hatch that also passes. Dropping all 54 single names
+      leaves 66 ETFs, which is close to survivorship-free, and that arm still
+      clears the gates: walk-forward Sharpe 0.78, drawdown -24.4%, 15 of 19
+      folds positive, GO. Run with `--weights bucket` over an ETF-only list if
+      you would rather hold the version whose backtest cannot be flattered.
+
+The honest summary: survivorship is a real haircut on the single-name sleeve
+and an implausible threat to the strategy, because the sleeve is one sixth of
+the book and there is a variant without it that still works.
 
 TURNOVER AND COST, and why the cost stress test is weak evidence. Bucket
 weights are fixed, so constituents only trade when the frozen list changes;
