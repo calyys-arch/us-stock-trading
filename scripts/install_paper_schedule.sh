@@ -50,14 +50,28 @@ install)
 </dict>
 </plist>
 PLISTEOF
+    mkdir -p "$REPO/logs"
+    # `launchctl load` exits 0 in cases where nothing was registered, so trusting
+    # its status printed "installed and loaded" over a schedule that did not
+    # exist -- and the only symptom would have been a ledger that quietly stopped
+    # accumulating. Prefer the modern subcommand, fall back to the old one, then
+    # verify against launchctl list and refuse to claim success without it.
+    launchctl bootout "gui/$(id -u)/$LABEL" 2>/dev/null
     launchctl unload "$PLIST" 2>/dev/null
-    if launchctl load "$PLIST" 2>&1; then
+    launchctl bootstrap "gui/$(id -u)" "$PLIST" 2>/dev/null \
+        || launchctl load "$PLIST" 2>/dev/null
+
+    if launchctl list | grep -qF "$LABEL"; then
         echo "已安裝並載入 $LABEL"
         echo "  排程：週一至週五 07:00（本地時間）"
         echo "  紀錄：logs/paper_v1.log"
         echo "  移除：bash scripts/install_paper_schedule.sh uninstall"
     else
-        echo "寫入了 $PLIST 但 launchctl load 失敗。"
+        echo "寫入了 $PLIST，但 launchd 沒有註冊這個 agent。"
+        echo "排程沒有生效——帳本不會自己推進。"
+        echo "常見原因：這個指令是在沙箱或非登入 session 裡跑的，"
+        echo "launchctl 連不到你的 GUI session。請在一般終端機裡直接跑："
+        echo "  launchctl bootstrap gui/\$(id -u) $PLIST"
         exit 1
     fi
     ;;
