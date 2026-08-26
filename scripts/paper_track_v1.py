@@ -22,15 +22,15 @@ THE RECORD STARTS EMPTY, ON PURPOSE. It does not replay history to
 manufacture a track record -- that would be another backtest wearing a
 different hat. Everything in the journal is dated after --init.
 
-ONE HONEST DISCREPANCY, WORTH KNOWING BEFORE READING THE RESULTS. The
-backtest's `gross_returns` re-weights constituents to equal-within-bucket
-EVERY day and charges nothing for it; it only charges cost when total exposure
-changes. So the measured Sharpe of 0.89 quietly assumed free daily
-rebalancing. This ledger cannot assume that, so it rebalances constituents
-monthly, charges every dollar it trades, and reports realized cost separately.
-Expect this account to run BELOW the backtest by roughly that omitted cost,
-and read the gap as a correction to the backtest rather than a failure of the
-strategy.
+ONE DISCREPANCY WITH THE BACKTEST, MEASURED RATHER THAN FEARED. The backtest's
+`gross_returns` re-weights constituents to equal-within-bucket EVERY day and
+charges nothing for it, billing only changes in total exposure, so the measured
+Sharpe of 0.89 assumed free daily rebalancing. Sizing that assumption: pulling
+120 names back to equal-within-bucket costs 0.85% of the book in one-way
+turnover per day, which at 4bps is 0.09% per YEAR against an 11.5% CAGR --
+about 0.01 of Sharpe. Immaterial. This ledger still rebalances constituents
+monthly and charges every dollar it trades, but the gap that creates against
+the backtest is basis points, not a correction that changes any decision.
 
 WHAT WOULD FALSIFY THE STRATEGY, stated before the data arrives so it cannot
 be rationalized later. The walk-forward said Sharpe 0.89, profit factor 1.17,
