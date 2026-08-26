@@ -48,6 +48,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from python.backtest.monte_carlo import MonteCarloValidator  # noqa: E402
+from python.portfolio.strategy_v1 import band_exposure  # noqa: E402
 from scripts.run_daily_baseline_gates import (  # noqa: E402
     _max_dd, _profit_factor, _sharpe, load_panel, TRADING_DAYS,
 )
@@ -92,17 +93,20 @@ def exposure_path(gross: pd.Series, target_vol: float) -> pd.Series:
     Realized vol is computed over days strictly BEFORE the day it sizes:
     `.shift(1)` after the rolling window, so no day's exposure is informed by
     its own return.
+
+    The band itself lives in `python.portfolio.strategy_v1.band_exposure`, which
+    the order sheet and the paper ledger also call, so the rule cannot drift
+    between the thing that measured it and the things that act on it.
     """
     realized = gross.rolling(VOL_LOOKBACK).std(ddof=1) * np.sqrt(TRADING_DAYS)
     raw = (target_vol / realized.shift(1)).clip(upper=MAX_EXPOSURE)
 
-    out, current = [], np.nan
+    out, current = [], None
     for value in raw.to_numpy():
         if np.isnan(value):
             out.append(np.nan)
             continue
-        if np.isnan(current) or abs(value - current) / max(current, 1e-9) > REBALANCE_BAND:
-            current = value
+        current, _moved = band_exposure(value, current, REBALANCE_BAND)
         out.append(current)
     return pd.Series(out, index=gross.index)
 

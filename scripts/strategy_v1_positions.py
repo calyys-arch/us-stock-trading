@@ -17,9 +17,23 @@ WHAT IT DOES, in four rules.
   3. Scale TOTAL exposure to hit 15% annualized volatility: exposure =
      0.15 / (realized vol of the basket over the last 60 trading days), capped
      at 1.0 so it never borrows. The rest sits in cash.
-  4. Only re-size when that number moves more than 10% relative to what is
-     currently held. Without the band, volatility noise churns the whole book
-     and pays spread for nothing.
+  4. Only re-size when that number moves more than 10% relative to the exposure
+     LAST APPLIED -- not relative to what the account has drifted to. Without
+     the band, volatility noise churns the whole book and pays spread for
+     nothing. The rule lives in one place, python/portfolio/strategy_v1.py
+     :band_exposure, which the backtest, this sheet and the paper ledger all
+     call. It used to exist as three separate copies with three different
+     anchors: the ledger measured against invested/equity, the drifted actual,
+     which made its path diverge from the measured one by up to 0.294 and made
+     that divergence depend on price history since the last trade rather than on
+     the rule. The applied target wins because it is what every number here was
+     measured under, and because it keeps the path a function of prices alone --
+     two accounts running this from the same date now stay in step.
+
+     This sheet's anchor lives in backtests/reports/strategy_v1_state.json and
+     is only as good as your `--commit` discipline, so it refuses to size
+     anything off an anchor older than 15 trading days rather than applying the
+     band to a number that no longer describes the account.
 
 WHY RULE 2 EXISTS. The first version equal-weighted all 120 instruments, which
 sounds neutral and is not: 83 of the 120 are US equity, so US beta got 69% of
@@ -138,7 +152,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from python.portfolio.strategy_v1 import (  # noqa: E402
-    COLLAPSE, bucket_weighted_gross, load_prices, load_universe,
+    COLLAPSE, band_exposure, bucket_weighted_gross, load_prices, load_universe,
     target_weights,
 )
 from scripts.run_vol_target_study import (  # noqa: E402
@@ -153,6 +167,11 @@ STATE_FILE = ROOT / "backtests/reports/strategy_v1_state.json"
 # dropping a stale name would quietly change the strategy, so this warns and
 # holds the line instead.
 MAX_STALE_DAYS = 5
+# How old the band's anchor may be before this refuses to size anything. The
+# backtest updates its anchor every day it trades; a sheet run against a
+# six-week-old anchor is applying the band to a number that no longer describes
+# the account, and it fails in whichever direction the stale value points.
+MAX_ANCHOR_DAYS = 15
 
 
 def current_exposure(gross: pd.Series, target_vol: float) -> tuple[float, float]:
@@ -182,13 +201,23 @@ def _capital_for_drag(weights: dict[str, float], prices: pd.Series,
     return 20_000_000.0
 
 
-def held_last_time() -> float | None:
+def held_last_time() -> tuple[float | None, str | None]:
+    """The band anchor and the date it was recorded.
+
+    The date matters. The anchor is the last exposure this sheet was told it
+    applied, and if the operator forgot `--commit`, or committed six weeks ago,
+    the band is being measured against a number that no longer describes the
+    account. That used to fail silently in both directions: a missing anchor
+    skipped the band entirely and traded every run, and a stale one suppressed
+    trades that should have happened.
+    """
     if not STATE_FILE.exists():
-        return None
+        return None, None
     try:
-        return float(json.loads(STATE_FILE.read_text())["exposure"])
+        state = json.loads(STATE_FILE.read_text())
+        return float(state["exposure"]), state.get("as_of")
     except (ValueError, KeyError, TypeError):
-        return None
+        return None, None
 
 
 def main() -> int:
@@ -226,16 +255,28 @@ def main() -> int:
                                         VOL_LOOKBACK, REBALANCE_BAND,
                                         ONE_WAY_COST_BPS)[0])
     realized, want = current_exposure(gross, args.target_vol)
-    holding = held_last_time()
+    anchor, anchor_date = held_last_time()
 
-    if holding is None:
-        exposure, action = want, "初次建立部位"
-    elif abs(want - holding) / max(holding, 1e-9) > REBALANCE_BAND:
-        exposure, action = want, f"調整曝險 {holding:.2f} -> {want:.2f}"
+    anchor_age = None
+    if anchor is not None and anchor_date:
+        anchor_age = int(
+            (panel.index > pd.Timestamp(anchor_date)).sum())
+        if anchor_age > MAX_ANCHOR_DAYS:
+            print(f"!! 再平衡帶的錨點記錄於 {anchor_date}，已隔 {anchor_age} 個"
+                  f"交易日，超過 {MAX_ANCHOR_DAYS} 日上限。")
+            print(f"   這個錨點已經不能描述帳戶現況，帶會給出無意義的判斷。")
+            print(f"   請確認實際曝險後用 --commit 重新記錄，或刪除 "
+                  f"{STATE_FILE.relative_to(ROOT)} 從頭建立部位。")
+            return 1
+
+    exposure, moved = band_exposure(want, anchor, REBALANCE_BAND)
+    if anchor is None:
+        action = "初次建立部位"
+    elif moved:
+        action = f"調整曝險 {anchor:.2f} -> {exposure:.2f}"
     else:
-        exposure, action = holding, (
-            f"不動作：目標 {want:.2f} 與現有 {holding:.2f} 差距未超過 "
-            f"{REBALANCE_BAND:.0%} 再平衡帶")
+        action = (f"不動作：目標 {want:.2f} 與採用中的 {anchor:.2f} 差距未超過 "
+                  f"{REBALANCE_BAND:.0%} 再平衡帶")
 
     # Size only what can be priced, but re-derive the weights over that subset
     # so the four buckets still sit at 25% each. The sizing loop used to skip an

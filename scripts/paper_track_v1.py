@@ -25,19 +25,35 @@ different hat. Everything in the journal is dated after --init.
 ONE DISCREPANCY WITH THE BACKTEST, MEASURED RATHER THAN FEARED. The backtest's
 `gross_returns` re-weights constituents to equal-within-bucket EVERY day and
 charges nothing for it, billing only changes in total exposure, so the measured
-Sharpe of 0.89 assumed free daily rebalancing. Sizing that assumption: pulling
+Sharpe of 0.91 assumed free daily rebalancing. Sizing that assumption: pulling
 120 names back to equal-within-bucket costs 0.85% of the book in one-way
 turnover per day, which at 4bps is 0.09% per YEAR against an 11.5% CAGR --
 about 0.01 of Sharpe. Immaterial. This ledger still rebalances constituents
 monthly and charges every dollar it trades, but the gap that creates against
 the backtest is basis points, not a correction that changes any decision.
 
+THE BAND ANCHORS ON THE APPLIED TARGET, which it did not always. This ledger
+used to measure the 10% rebalance band against `invested / equity` -- the
+exposure the account had drifted to -- while the backtest measured it against
+the last applied target. Same name, different rule: over the same panel the two
+paths agreed to 0.015 on average but differed by up to 0.294, and because the
+drifted anchor depends on every price move since the last trade, two accounts
+running this from the same date would separate permanently. Both now call
+python/portfolio/strategy_v1.py:band_exposure, and
+tests/test_exposure_band_is_one_rule.py replays this ledger against
+`exposure_path` day by day to keep them together. Each row still records
+`exposure_held` and `exposure_drift` so the wander is visible, but nothing
+decides on it.
+
 WHAT WOULD FALSIFY THE STRATEGY, stated before the data arrives so it cannot
-be rationalized later. The walk-forward said Sharpe 0.89, profit factor 1.17,
+be rationalized later. The walk-forward said Sharpe 0.91, profit factor 1.17,
 max drawdown -24.6% over 1,646 out-of-sample days. Over any comparable stretch
-here, a drawdown worse than -30%, or a profit factor below 1.0, is the
-strategy failing rather than noise. Below a few hundred days no verdict is
-available in either direction, and --report refuses to imply one.
+here, a drawdown worse than -30%, or a realized Sharpe below zero, is the
+strategy failing rather than noise. Profit factor is deliberately NOT one of
+these: on a daily return series PF >= 1 is algebraically identical to
+sum(returns) >= 0, so it would restate "the account is down" as if it were an
+independent test. Below a few hundred days no verdict is available in either
+direction, and --report refuses to imply one.
 """
 from __future__ import annotations
 
@@ -54,7 +70,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from python.portfolio.strategy_v1 import (  # noqa: E402
-    COLLAPSE, bucket_weighted_gross, load_prices, load_universe,
+    COLLAPSE, band_exposure, bucket_weighted_gross, load_prices, load_universe,
     target_weights,
 )
 from scripts.run_daily_baseline_gates import (  # noqa: E402
@@ -276,6 +292,13 @@ def _run(args: argparse.Namespace) -> int:
     cash = float(last["cash"])
     last_date = pd.Timestamp(last["date"])
     target_vol = float(last.get("target_vol") or args.target_vol)
+    # The band's anchor. Older journal rows predate this field, so fall back to
+    # the target that was in force -- not to `exposure_held`, which is the
+    # drifted actual and is exactly the anchor this replaced.
+    applied = last.get("exposure_applied")
+    if applied is None:
+        applied = last.get("exposure_target")
+    applied = None if applied is None else float(applied)
 
     pending = panel.index[panel.index > last_date]
     if not len(pending):
@@ -319,23 +342,29 @@ def _run(args: argparse.Namespace) -> int:
         # Constituents drift with prices; the backtest silently re-weighted
         # them daily for free, so this pulls them back monthly and pays for it.
         monthly = (day.year, day.month) != (last_date.year, last_date.month)
-        band_tripped = (not holdings) or (
-            np.isfinite(want)
-            and abs(want - held) / max(held, 1e-9) > REBALANCE_BAND)
+        # Band against the last APPLIED target, the same anchor the backtest and
+        # the order sheet use. This used to compare against `held` --
+        # invested/equity, the drifted actual -- which made the ledger's
+        # exposure path diverge from the measured one by up to 0.294 and made
+        # the divergence depend on price history since the last trade.
+        target, band_tripped = band_exposure(want, applied, REBALANCE_BAND)
+        if not holdings:
+            target, band_tripped = want, True
 
         action, cost = "hold", 0.0
-        if np.isfinite(want) and (band_tripped or monthly):
+        if np.isfinite(target) and (band_tripped or monthly):
             # Decide the label from the state BEFORE trading; afterwards
             # holdings is always non-empty and every entry reads "rebalance".
             first_time = not holdings
             weights = target_weights(
                 [s for s in symbols if s in panel.columns], bucket_of, "bucket")
             holdings, cash, cost = _trade_to(holdings, prices, weights,
-                                             equity, want)
+                                             equity, target)
             action = "enter" if first_time else "rebalance"
             equity, invested = _equity(holdings, prices, cash)
             held = invested / equity if equity > 0 else 0.0
-        elif not np.isfinite(want):
+            applied = target
+        elif not np.isfinite(target):
             action = "warmup"
 
         entry = {
@@ -343,6 +372,13 @@ def _run(args: argparse.Namespace) -> int:
             "equity": round(equity, 2), "cash": round(cash, 2),
             "exposure_held": round(held, 4),
             "exposure_target": None if not np.isfinite(want) else round(want, 4),
+            # The band anchor, carried forward so the next run reproduces the
+            # backtest's path. `exposure_held` drifts with prices and is kept
+            # only as a diagnostic of how far the book has wandered from it.
+            "exposure_applied": None if applied is None or not np.isfinite(applied)
+                                else round(applied, 4),
+            "exposure_drift": None if applied is None or not np.isfinite(applied)
+                              else round(held - applied, 4),
             "realized_vol": None if not np.isfinite(realized) else round(realized, 4),
             "cost": round(cost, 2), "target_vol": target_vol,
             "reason": ("首次進場" if action == "enter" else

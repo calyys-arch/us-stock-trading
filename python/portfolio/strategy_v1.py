@@ -32,6 +32,36 @@ COLLAPSE = {
 BUCKETS = tuple(sorted(set(COLLAPSE.values())))
 
 
+def band_exposure(raw_target: float, last_applied: float | None,
+                  band: float) -> tuple[float, bool]:
+    """Apply the rebalance band. THE definition of when exposure moves.
+
+    Returns (exposure_to_hold, did_it_move).
+
+    The anchor is the LAST APPLIED TARGET, never the exposure currently drifting
+    in the account. Three copies of this rule had drifted apart: the backtest
+    anchored on the last applied target, the order sheet on the last value the
+    operator remembered to `--commit`, and the paper ledger on `invested/equity`
+    -- the drifted actual. Over the same panel the backtest and the drifted-
+    anchor path agreed to 0.015 on average but differed by up to 0.294, with
+    4.9% of days apart by more than 0.05. No test could catch it, because the
+    sheet's path depended on how often a human happened to run it.
+
+    The last applied target wins because it is what every published number was
+    measured under, and because it is reproducible from prices alone: a drifted
+    anchor makes today's decision depend on the whole history of price moves
+    since the last trade, so two accounts following the same rule from the same
+    date diverge permanently.
+    """
+    if not np.isfinite(raw_target):
+        return float("nan"), False
+    if last_applied is None or not np.isfinite(last_applied):
+        return raw_target, True
+    if abs(raw_target - last_applied) / max(last_applied, 1e-9) > band:
+        return raw_target, True
+    return last_applied, False
+
+
 def load_universe() -> tuple[list[str], dict[str, str]]:
     """Frozen instrument list and its fine-grained bucket label per symbol."""
     spec = json.loads(UNIVERSE_FILE.read_text())
