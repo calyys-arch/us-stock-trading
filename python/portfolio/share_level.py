@@ -34,7 +34,7 @@ from __future__ import annotations
 import numpy as np
 import pandas as pd
 
-from python.portfolio.broker_costs import commission, min_notional_for_cost_ceiling
+from python.portfolio.broker_costs import IBKR_PRO_FIXED, FeeSchedule
 from python.portfolio.strategy_v1 import COLLAPSE, band_exposure, target_weights
 
 
@@ -73,8 +73,7 @@ def simulate(
     scheme: str = "bucket",
     cost_ceiling_bps: float | None = None,
     spread_bps_one_way: float = 4.0,
-    per_share: float = 0.005,
-    min_per_order: float = 1.00,
+    schedule: FeeSchedule = IBKR_PRO_FIXED,
     fractional: bool = False,
     exposure_band: float = 0.10,
     charge_costs: bool = True,
@@ -90,9 +89,14 @@ def simulate(
     answer a specific question: a band improves the result partly by saving fees
     and partly by letting weights drift, and the two have very different
     standing -- the fee saving is arithmetic, the drift is one window's luck.
-    Zeroing `per_share` and `min_per_order` cannot answer it, because the band's
-    own threshold is derived from those numbers, so setting them to zero
-    silently removes the band as well and makes both arms the same run.
+    Passing a zero-fee `schedule` cannot answer it, because the band's own
+    threshold is derived from the schedule, so zeroing it silently removes the
+    band as well and makes both arms the same run.
+
+    `schedule` decides more than the size of the bill. IBKR lets its 1% cap
+    override the per-order minimum and Futu does not, which makes the small
+    orders a rebalance produces eight times dearer at Futu and can flip whether
+    maintaining constituent weights is worth doing at all.
 
     Returns the daily rows (equity, invested, concentration) and a per-rebalance
     trade log.
@@ -153,11 +157,9 @@ def simulate(
             notional = abs(delta) * price
             if notional <= 0:
                 continue
-            if ceiling is not None:
-                floor = min_notional_for_cost_ceiling(
-                    price, ceiling, per_share=per_share, minimum=min_per_order)
-                if notional < floor:
-                    continue
+            if ceiling is not None and \
+                    notional < schedule.min_notional_for_ceiling(price, ceiling):
+                continue
             orders[symbol] = delta
 
         # Liquidate anything that fell out of the priceable set entirely.
@@ -173,8 +175,7 @@ def simulate(
                 if delta == 0:
                     continue
                 px = float(prices[symbol])
-                total += commission(delta, px, per_share=per_share,
-                                    minimum=min_per_order)
+                total += schedule.charge(delta, px)
                 total += abs(delta) * px * spread_bps_one_way / 10_000.0
             return total
 

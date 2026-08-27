@@ -2,124 +2,217 @@
 
 The backtests in this repo charge ONE_WAY_COST_BPS = 4bps on notional traded.
 That is a reasonable model for spread and impact, and it is completely wrong
-about commission, because commission is not proportional to notional. IBKR Pro
-Fixed charges per SHARE with a floor and a ceiling:
+about commission, because commission is not proportional to notional. It is
+billed per ORDER, with a floor, and the floor is what dominates at retail size.
 
-    USD 0.005 per share
-    minimum USD 1.00 per order
-    maximum 1% of trade value, and the cap overrides the floor
+TWO BROKERS, AND THE DIFFERENCE BETWEEN THEM IS NOT THE HEADLINE RATE. Per share
+IBKR and Futu are within a hundredth of a cent of each other. What separates
+them is how the per-order minimum interacts with the percentage cap:
 
-(interactivebrokers.com/en/pricing/commissions-stocks.php, verified 2026-08-26.
-US-listed ETFs are charged identically to stocks -- there is no separate ETF
-schedule. The one cost ETFs have that stocks do not, the expense ratio, needs
-no modelling here because it is deducted from NAV daily and is therefore
-already inside any return computed from prices.)
+    IBKR   the 1% cap OVERRIDES the floor. Their own worked example: 10 shares
+           of a $0.20 stock is charged $0.02, not the $1.00 minimum.
+    Futu   the floor OVERRIDES the 0.5% cap -- "若與每筆最低收費標準衝突，
+           以最低收費標準為準".
 
-The floor is what matters at retail size, and it matters enormously. A flat
-4bps model says a $817 order costs $0.33; the floor says $1.00, three times as
-much. Spread that over a 120-instrument book rebalanced monthly and the gap
-becomes the difference between a strategy that clears its costs and one that
-does not.
+For a full position that distinction is invisible. For the small orders a
+monthly rebalance produces it is everything: a $25 correction costs $0.25 at
+IBKR and $1.99 at Futu, eight times more. Any conclusion about whether it is
+worth maintaining constituent weights depends entirely on which of these the
+account actually trades through, so the schedule is a parameter rather than a
+constant.
 
-The cap is what matters for small adjustments, which is exactly what a
-rebalance produces: a $50 top-up costs $0.50, not $1.00. Any rule that decides
-whether a small trade is worth making has to price it through the cap, not the
-floor, or it will refuse trades that are actually cheap.
+Futu also stacks two separate per-order minimums -- commission $0.99 and
+platform fee $1.00 -- so its effective floor is $1.99 against IBKR's $1.00.
+
+WHAT IS MODELLED AND WHAT IS NOT. Commission, platform fee and the per-share
+settlement fee are modelled. FINRA's TAF is not: it is $0.000195 a share on
+sells only, which on this book is under two cents a rebalance. The SEC fee was
+abolished on 2025-05-14 and is zero. ETFs are charged as stocks at both
+brokers; an ETF's expense ratio needs no modelling here because it is deducted
+from NAV daily and is therefore already inside any return computed from prices.
+
+Rates verified 2026-08-26 against interactivebrokers.com/en/pricing and
+futuhk.com/support/topic2_283.
 """
 from __future__ import annotations
 
-PER_SHARE = 0.005
-MIN_PER_ORDER = 1.00
-MAX_FRACTION_OF_VALUE = 0.01
+from dataclasses import dataclass
+from pathlib import Path
 
-# IBKR Lite is commission-free on US stocks but is US-residents-only and routes
-# for payment order flow, paying in spread instead of commission. Modelled as
-# zero commission on the understanding that the 4bps spread assumption then
-# carries the whole cost.
-LITE_PER_SHARE = 0.0
+import yaml
 
 
-def commission(shares: float, price: float, per_share: float = PER_SHARE,
-               minimum: float = MIN_PER_ORDER) -> float:
-    """Commission for one order under IBKR Pro Fixed.
+@dataclass(frozen=True)
+class FeeSchedule:
+    """One broker's per-order charge.
 
-    The cap is applied last and deliberately overrides the floor, matching the
-    published footnote: 10 shares of a $0.20 stock is charged $0.02, not the
-    $1.00 minimum, because 10 * 0.20 * 1% = 0.02 is smaller.
+    `components` is a tuple of (per_share_rate, per_order_minimum) pairs, one
+    per line item the broker bills separately. They are kept separate rather
+    than summed because each carries its own minimum, and the rates cross their
+    respective floors at slightly different share counts.
+
+    `cap_overrides_floor` is the whole reason this is a dataclass and not two
+    numbers. It decides which side wins when a tiny order's percentage cap
+    falls below the per-order minimum, and it is the difference between a
+    rebalance being nearly free and being unaffordable.
     """
-    shares, price = abs(float(shares)), abs(float(price))
-    if shares <= 0 or price <= 0:
-        return 0.0
-    notional = shares * price
-    if per_share <= 0 and minimum <= 0:
-        return 0.0
-    return min(max(minimum, shares * per_share),
-               notional * MAX_FRACTION_OF_VALUE)
+
+    name: str
+    components: tuple[tuple[float, float], ...]
+    cap_fraction: float
+    cap_overrides_floor: bool
+    # Third-party per-share charges with no minimum of their own, so they scale
+    # cleanly and are never capped.
+    third_party_per_share: float = 0.0
+    note: str = ""
+
+    @property
+    def min_per_order(self) -> float:
+        return sum(minimum for _rate, minimum in self.components)
+
+    @property
+    def per_share(self) -> float:
+        return sum(rate for rate, _minimum in self.components) \
+            + self.third_party_per_share
+
+    def charge(self, shares: float, price: float) -> float:
+        shares, price = abs(float(shares)), abs(float(price))
+        if shares <= 0 or price <= 0:
+            return 0.0
+        notional = shares * price
+        billed = sum(max(minimum, rate * shares)
+                     for rate, minimum in self.components)
+        if self.cap_fraction > 0:
+            capped = min(billed, notional * self.cap_fraction)
+            billed = capped if self.cap_overrides_floor \
+                else max(capped, self.min_per_order)
+        return billed + self.third_party_per_share * shares
+
+    def min_notional_for_ceiling(self, price: float,
+                                 ceiling_bps: float) -> float:
+        """Smallest order whose total charge stays within `ceiling_bps` of the
+        value it moves. This is the no-trade band.
+
+        Solved by bisection rather than algebra. The closed form has to case
+        split on which component's floor binds, whether the cap is active and
+        which way `cap_overrides_floor` points, and an earlier attempt to write
+        it out got the IBKR case right and would have got Futu wrong. The
+        charge is monotone in size over the region that matters, so searching
+        is both shorter and harder to get wrong.
+        """
+        price = abs(float(price))
+        if price <= 0 or ceiling_bps <= 0:
+            return float("inf")
+        ceiling = ceiling_bps / 10_000.0
+        if self.per_share <= 0 and self.min_per_order <= 0:
+            return 0.0
+
+        def ratio(notional: float) -> float:
+            return self.charge(notional / price, price) / notional
+
+        # Above this the per-share rate alone decides, and it only improves
+        # with size up to that point, so if it fails here it fails everywhere.
+        ceiling_at_scale = self.per_share / price
+        if ceiling_at_scale > ceiling:
+            return float("inf")
+
+        lo, hi = 1e-6, max(price, 1.0)
+        while ratio(hi) > ceiling:
+            hi *= 2
+            if hi > 1e12:
+                return float("inf")
+        for _ in range(200):
+            mid = (lo + hi) / 2
+            if ratio(mid) > ceiling:
+                lo = mid
+            else:
+                hi = mid
+        return hi
 
 
-def commission_bps(shares: float, price: float, **kw) -> float:
-    """Commission as basis points of the notional traded.
+IBKR_PRO_FIXED = FeeSchedule(
+    name="IBKR Pro Fixed",
+    components=((0.005, 1.00),),
+    cap_fraction=0.01,
+    cap_overrides_floor=True,
+    note="USD 0.005/share, min USD 1.00, max 1% of trade value (cap wins)",
+)
 
-    Useful because the answer is wildly non-constant: the same $1.00 floor is
-    12bps on an $817 order and 200bps on a $50 one, which is why a no-trade
-    band has to be expressed in dollars rather than in a percentage drift.
+FUTU_HK_FIXED = FeeSchedule(
+    name="Futu Securities (HK), fixed platform plan",
+    # Commission and platform fee are billed separately, each with its own
+    # minimum, so the effective floor is $1.99 rather than $1.00.
+    components=((0.0049, 0.99), (0.005, 1.00)),
+    cap_fraction=0.005,
+    cap_overrides_floor=False,
+    third_party_per_share=0.003,  # settlement fee, both sides
+    note="0.0049+0.005/share, min 0.99+1.00, cap 0.5% but the floor wins; "
+         "settlement 0.003/share. TAF (sell, 0.000195/share) omitted as "
+         "immaterial; SEC fee abolished 2025-05-14.",
+)
+
+# Commission-free routing. IBKR Lite is US-residents-only and pays for order
+# flow, so the cost moves into the spread rather than disappearing; the 4bps
+# spread assumption then carries the whole bill.
+NO_COMMISSION = FeeSchedule(name="none", components=(), cap_fraction=0.0,
+                            cap_overrides_floor=True)
+
+SCHEDULES = {"ibkr": IBKR_PRO_FIXED, "futu": FUTU_HK_FIXED,
+             "none": NO_COMMISSION}
+
+BROKER_CONFIG_PATH = Path("configs/broker.yaml")
+
+
+def load_schedule(config_path: str | Path = BROKER_CONFIG_PATH) -> FeeSchedule:
+    """Whose fees to charge, from configs/broker.yaml's `broker:` key.
+
+    Deliberately not defaulted to whichever gateway happens to be running.
+    The gateway supplies prices; the fee schedule has to match the account that
+    would actually fill the order, and on this machine those are two different
+    firms -- the IB Gateway session is a paper account (DU-prefixed) that
+    cannot execute, while the Futu account is funded.
+    """
+    try:
+        with open(config_path, encoding="utf-8") as f:
+            name = str((yaml.safe_load(f) or {}).get("broker", "ibkr")).lower()
+    except FileNotFoundError:
+        name = "ibkr"
+    if name not in SCHEDULES:
+        raise ValueError(f"configs/broker.yaml broker: {name!r} is not one of "
+                         f"{sorted(SCHEDULES)}")
+    return SCHEDULES[name]
+
+
+def commission(shares: float, price: float,
+               schedule: FeeSchedule = IBKR_PRO_FIXED) -> float:
+    return schedule.charge(shares, price)
+
+
+def commission_bps(shares: float, price: float,
+                   schedule: FeeSchedule = IBKR_PRO_FIXED) -> float:
+    """Charge as basis points of the notional traded.
+
+    Useful because the answer is wildly non-constant: at IBKR the same $1.00
+    floor is 12bps on an $817 order and 100bps on a $50 one.
     """
     notional = abs(float(shares)) * abs(float(price))
     if notional <= 0:
         return 0.0
-    return commission(shares, price, **kw) / notional * 10_000
+    return schedule.charge(shares, price) / notional * 10_000
 
 
 def min_notional_for_cost_ceiling(price: float, ceiling_bps: float,
-                                  per_share: float = PER_SHARE,
-                                  minimum: float = MIN_PER_ORDER) -> float:
-    """Smallest order whose commission stays within `ceiling_bps` of its value.
-
-    This is the no-trade band. Below this notional an order cannot clear the
-    ceiling no matter how much you want to make it, so the honest response is
-    to leave the position alone until drift accumulates.
-
-    Two regimes, and the boundary between them is where the floor stops binding:
-
-      While the per-share charge is under the floor, commission is a flat
-          `minimum`, so the ratio is minimum/notional and the band is simply
-          minimum / ceiling. At $1.00 and 10bps that is $1,000 -- a threshold
-          most retail rebalances never reach, which is the real finding.
-      Once the per-share charge exceeds the floor, commission scales with
-          notional and the ratio becomes per_share/price -- independent of size,
-          and inversely proportional to share price. That works out to 0.5bps on
-          a $100 share, 5bps on a $10 one and 25bps on a $2 one, so a
-          low-priced name is expensive to trade at ANY size and no order clears
-          a tight ceiling.
-
-    The practical upshot is that the proportional regime is nearly free next to
-    the 4bps spread assumption, and essentially all of the commission problem at
-    retail size is the floor.
-    """
-    price = abs(float(price))
-    if price <= 0 or ceiling_bps <= 0:
-        return float("inf")
-    ceiling = ceiling_bps / 10_000.0
-    if per_share <= 0 and minimum <= 0:
-        return 0.0
-    # Proportional regime: ratio is per_share / price regardless of size.
-    proportional = per_share / price
-    if proportional > ceiling:
-        return float("inf")
-    from_floor = minimum / ceiling
-    # Below `minimum / per_share * price` the floor binds; above it the
-    # proportional rate does, and we already know that rate clears.
-    floor_binds_below = minimum / per_share * price if per_share > 0 else \
-        float("inf")
-    return min(from_floor, floor_binds_below) if from_floor <= floor_binds_below \
-        else floor_binds_below
+                                  schedule: FeeSchedule = IBKR_PRO_FIXED
+                                  ) -> float:
+    return schedule.min_notional_for_ceiling(price, ceiling_bps)
 
 
-def basket_commission(orders: dict[str, tuple[float, float]], **kw) -> float:
-    """Total commission for a basket, as {symbol: (shares, price)}.
+def basket_commission(orders: dict[str, tuple[float, float]],
+                      schedule: FeeSchedule = IBKR_PRO_FIXED) -> float:
+    """Total charge for a basket, as {symbol: (shares, price)}.
 
     Summed per order rather than on aggregate notional, because the floor
     applies once per order and that is the entire point.
     """
-    return sum(commission(shares, price, **kw)
+    return sum(schedule.charge(shares, price)
                for shares, price in orders.values())

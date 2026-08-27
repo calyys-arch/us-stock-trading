@@ -39,6 +39,19 @@ drift correction is 50bps of the value moved. An earlier note in this repo
 applied the floor to everything and claimed a 1.44%-a-year drag; that was wrong
 by roughly 4x.
 
+AND THAT CAP IS A PROPERTY OF THE BROKER, NOT OF COMMISSION. Everything above
+holds because IBKR lets its 1% cap override the per-order minimum. Futu, priced
+in the same module and reachable by setting `broker: futu` in
+configs/broker.yaml, resolves the same conflict the opposite way -- its own
+schedule says the minimum wins -- and stacks two minimums ($0.99 commission plus
+$1.00 platform fee) for a $1.99 floor no small order can escape. The same $25
+correction costs $0.25 here and $1.99 there. Two conclusions on this page invert
+under that schedule: fractional shares stop being the largest available
+improvement and become a 1.23pp-a-year loss, because fractional targets generate
+an order in every name every month and there is no cap to make them cheap, while
+integer rounding accidentally suppresses them. Do not carry these numbers to
+another broker without re-running scripts/run_retail_cost_study.py --broker.
+
 SO THE MONTHLY CONSTITUENT REBALANCE MOSTLY DOES NOT HAPPEN ANY MORE.
 DRIFT_BAND_BPS refuses any drift correction whose commission would exceed 10bps
 of the value it moves, which at this account size means most of them. Measured
@@ -102,9 +115,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from python.portfolio.broker_costs import (  # noqa: E402
-    commission, min_notional_for_cost_ceiling,
-)
+from python.portfolio.broker_costs import load_schedule  # noqa: E402
 from python.portfolio.strategy_v1 import (  # noqa: E402
     COLLAPSE, DRIFT_BAND_BPS, band_exposure, bucket_weighted_gross, load_prices,
     load_universe, target_weights,
@@ -212,19 +223,24 @@ def _size_to(holdings: dict[str, float], prices: pd.Series,
 
     Cost is spread plus commission, and commission is priced PER ORDER because
     that is how a broker charges it. The ledger used to charge a flat 4bps of
-    notional, which models spread but is silent on the $1.00-per-order minimum
-    -- and at retail size the minimum is most of the bill. Over 2018-2026 at
-    $100k that omission was worth about 0.7% a year.
+    notional, which models spread but is silent on the per-order minimum -- and
+    at retail size the minimum is most of the bill.
+
+    WHICH broker comes from configs/broker.yaml, and it is not a detail. The
+    per-share rates are nearly identical but the precedence is not: IBKR's 1%
+    cap overrides its $1.00 floor, Futu's $1.99 floor overrides its 0.5% cap.
+    A $25 drift correction therefore costs $0.25 at one and $1.99 at the other.
 
     With `ceiling` set, an order whose commission would exceed that share of
     the value it moves is not placed and the existing line is carried instead.
     """
     cost = 0.0
     new: dict[str, float] = {}
+    schedule = load_schedule()
 
     def charge(delta: float, price: float) -> None:
         nonlocal cost
-        cost += commission(delta, price)
+        cost += schedule.charge(delta, price)
         cost += abs(delta) * price * (ONE_WAY_COST_BPS / 10_000.0)
 
     for symbol, weight in weights.items():
@@ -239,7 +255,7 @@ def _size_to(holdings: dict[str, float], prices: pd.Series,
         delta = shares - holdings.get(symbol, 0.0)
         notional = abs(delta) * price
         if ceiling is not None and notional > 0 and \
-                notional < min_notional_for_cost_ceiling(price, ceiling):
+                notional < schedule.min_notional_for_ceiling(price, ceiling):
             new[symbol] = holdings.get(symbol, 0.0)
             continue
         new[symbol] = shares
@@ -289,19 +305,46 @@ def _trade_to(holdings: dict[str, float], prices: pd.Series,
     return new, max(cash, 0.0), cost
 
 
+def last_closed_session(now: pd.Timestamp | None = None) -> pd.Timestamp:
+    """The most recent date whose US close has definitely printed.
+
+    The ledger must never mark against a partial bar. Requesting today while
+    the US market is open returns one, and because a day is only pending once,
+    re-running later does not repair it -- the intraday print is frozen into an
+    append-only journal as if it were a close.
+
+    The previous rule was "ask for yesterday", which was safe but cost a day
+    more than intended: this machine's local date is a timezone ahead of New
+    York, so "yesterday" was often the session before last. Deciding in US
+    Eastern removes that, and the ledger stops running two sessions behind.
+
+    Weekends walk back to Friday. Holidays are not modelled and do not need to
+    be -- asking for a date with no session simply returns no bar.
+    """
+    now = (now or pd.Timestamp.now(tz="America/New_York"))
+    if now.tzinfo is None:
+        now = now.tz_localize("America/New_York")
+    day = now.normalize()
+    # 16:00 is the close; allow it to settle before trusting the print.
+    if now.hour < 17:
+        day -= pd.Timedelta(days=1)
+    while day.weekday() >= 5:
+        day -= pd.Timedelta(days=1)
+    return day.tz_localize(None)
+
+
 def _top_up() -> None:
-    """Bring the cache to today's close before advancing the ledger."""
+    """Bring the cache to the last closed US session before advancing."""
     from python.data.price_cache import top_up_cached_panel
 
     symbols, _ = load_universe()
     print("更新價格 ...", flush=True)
-    # Ask only for closes through YESTERDAY. Requesting today returns a partial
-    # intraday bar if this runs while the US market is open, and the ledger would
-    # mark -- and possibly trade -- against it. Re-running later is a no-op
-    # because the day is no longer pending, so that intraday print would be
-    # frozen into an append-only journal as if it were a close.
-    result = top_up_cached_panel(
-        symbols, pd.Timestamp.today().normalize() - pd.Timedelta(days=1))
+    # yfinance treats `end` as EXCLUSIVE, so asking for the session itself
+    # returns everything up to the day before it. The +1 is what makes the
+    # request mean what it says.
+    want = last_closed_session()
+    result = top_up_cached_panel(symbols, want + pd.Timedelta(days=1))
+    print(f"  目標交易日 {want.date()}")
     parts = [f"{len(result['topped_up'])} 檔延伸",
              f"{len(result['already_current'])} 檔已最新"]
     if result["readjusted"]:

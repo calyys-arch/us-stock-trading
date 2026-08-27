@@ -49,7 +49,9 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from python.portfolio.broker_costs import MIN_PER_ORDER, PER_SHARE  # noqa: E402
+from python.portfolio.broker_costs import (  # noqa: E402
+    NO_COMMISSION, SCHEDULES, FeeSchedule,
+)
 from python.portfolio.share_level import (  # noqa: E402
     invested_fraction, returns_of, simulate,
 )
@@ -180,7 +182,11 @@ def main() -> int:
     ap.add_argument("--draws", type=int, default=25,
                     help="random baskets per size, as a control on the price "
                          "ranking; 0 skips the control")
+    ap.add_argument("--broker", choices=sorted(SCHEDULES), default="ibkr",
+                    help="whose fee schedule to charge; the choice changes the "
+                         "answer, not just the size of the bill")
     args = ap.parse_args()
+    broker = SCHEDULES[args.broker]
 
     symbols, bucket_of = load_universe()
     panel = load_prices(symbols).loc[WINDOW_START:]
@@ -188,10 +194,14 @@ def main() -> int:
     payload: dict = {
         "run_at": datetime.now().isoformat(),
         "window": [str(panel.index[0].date()), str(panel.index[-1].date())],
+        "broker": args.broker,
         "commission_model": {
-            "per_share": PER_SHARE, "min_per_order": MIN_PER_ORDER,
-            "max_fraction_of_value": 0.01,
-            "source": "IBKR Pro Fixed, verified 2026-08-26",
+            "name": broker.name, "components": list(broker.components),
+            "min_per_order": broker.min_per_order,
+            "cap_fraction": broker.cap_fraction,
+            "cap_overrides_floor": broker.cap_overrides_floor,
+            "third_party_per_share": broker.third_party_per_share,
+            "note": broker.note, "verified": "2026-08-26",
         },
         "no_trade_band_ceilings_bps": [c for c in CEILINGS if c is not None],
         "modelled_spread_bps_one_way": ONE_WAY_COST_BPS,
@@ -200,9 +210,13 @@ def main() -> int:
 
     print(f"零售執行成本（股數層級實測）  "
           f"{panel.index[0].date()} -> {panel.index[-1].date()}")
-    print(f"佣金 ${PER_SHARE}/股，每筆最低 ${MIN_PER_ORDER:.2f}，"
-          f"上限成交金額 1%（IBKR Pro Fixed）"
-          f"；價差另計 {ONE_WAY_COST_BPS:.0f} bps 單邊\n")
+    print(f"券商 {broker.name}")
+    print(f"  每筆最低 ${broker.min_per_order:.2f}，"
+          f"上限成交金額 {broker.cap_fraction:.1%}，"
+          + ("上限蓋過最低" if broker.cap_overrides_floor else "最低蓋過上限"))
+    if broker.third_party_per_share:
+        print(f"  第三方每股 ${broker.third_party_per_share}")
+    print(f"  價差另計 {ONE_WAY_COST_BPS:.0f} bps 單邊\n")
 
     baskets: dict[int, list[str]] = {}
     exposures: dict[int, pd.Series] = {}
@@ -219,14 +233,15 @@ def main() -> int:
 
     def run_basket(names: list[str], exposure: pd.Series, capital: float,
                    ceiling: float | None, *, fractional: bool = False,
-                   commission: bool = True, charge: bool = True) -> dict:
+                   commission: bool = True, charge: bool = True,
+                   schedule: FeeSchedule | None = None) -> dict:
         daily, log = simulate(panel[names], bucket_of, exposure, capital,
                               cost_ceiling_bps=ceiling,
                               spread_bps_one_way=ONE_WAY_COST_BPS,
                               exposure_band=REBALANCE_BAND,
                               fractional=fractional, charge_costs=charge,
-                              per_share=PER_SHARE if commission else 0.0,
-                              min_per_order=MIN_PER_ORDER if commission else 0.0)
+                              schedule=(schedule or broker) if commission
+                              else NO_COMMISSION)
         rets = returns_of(daily)
         years = len(rets) / TRADING_DAYS
         # `cost_priced` is what the orders would cost; `cost` is what was

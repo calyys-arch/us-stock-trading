@@ -39,6 +39,36 @@ def ledger(tmp_path, monkeypatch):
     return panel
 
 
+@pytest.mark.parametrize("now_et,expect,why", [
+    ("2026-08-26 22:30", "2026-08-26", "after the close, today has printed"),
+    ("2026-08-26 11:00", "2026-08-25", "mid-session, today is still partial"),
+    ("2026-08-26 16:30", "2026-08-25", "just after the bell, let it settle"),
+    ("2026-08-24 09:00", "2026-08-21", "Monday pre-open falls back to Friday"),
+    ("2026-08-23 12:00", "2026-08-21", "Sunday falls back to Friday"),
+])
+def test_the_top_up_target_is_the_last_session_that_definitely_closed(
+        now_et, expect, why):
+    """Marking against a partial bar is unrepairable in an append-only journal,
+    but the old rule overpaid for that safety: it asked for the local
+    yesterday, and this machine's local date runs ahead of New York, so the
+    ledger sat two sessions behind rather than one."""
+    now = pd.Timestamp(now_et, tz="America/New_York")
+    assert pt.last_closed_session(now) == pd.Timestamp(expect), why
+
+
+def test_the_request_compensates_for_yfinances_exclusive_end(monkeypatch):
+    """Asking for the session itself returns everything up to the day before
+    it, which is how the second lost day crept in."""
+    seen = {}
+    monkeypatch.setattr(
+        "python.data.price_cache.top_up_cached_panel",
+        lambda symbols, end, **kw: seen.update(end=end) or {
+            "topped_up": [], "already_current": [], "readjusted": [],
+            "not_cached": [], "failed": []})
+    pt._top_up()
+    assert seen["end"] == pt.last_closed_session() + pd.Timedelta(days=1)
+
+
 def _args(**kw):
     # no_update stays on: these tests must never reach the network.
     base = {"init": False, "capital": 100_000.0, "target_vol": 0.15,

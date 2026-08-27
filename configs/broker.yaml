@@ -62,7 +62,41 @@ data_source: futu_live
 #              not running, price_cache logs a warning and falls back to
 #              yfinance — the run proceeds, and reports label the actual source.
 #   yfinance — skip IB entirely (python/simulation/hist_data_us.py).
-historical_data_source: ibkr
+#
+# Set to yfinance for a measured reason, not a convenience one. With IB Gateway
+# logged in and serving (verified 2026-08-27, account DUR123449), IBKR
+# ADJUSTED_LAST closes and yfinance auto_adjust closes agree to a median of
+# 0.0008% and a worst case of 0.0085% over 664 overlapping days on SPY/AAPL/
+# TLT/GLD -- the same numbers to four decimal places on the latest bar. So
+# there is no accuracy argument between them. There is a large speed one: IBKR
+# historical requests are paced per contract, and the Strategy V1 daily top-up
+# needs 120 symbols, which stalled outright (16 minutes, 0% CPU, zero symbols
+# written) where the batched yfinance path finishes in seconds. Switch back to
+# ibkr for a small universe or to cross-check a suspicious series.
+historical_data_source: yfinance
+
+# Whose commission schedule the portfolio work charges
+# (python/portfolio/broker_costs.py). This is NOT cosmetic and NOT just a
+# question of how big the bill is: per share the two are within a hundredth of
+# a cent, but IBKR lets its 1% cap override the per-order minimum while Futu
+# lets the minimum override its 0.5% cap. That single difference makes a $25
+# rebalance order cost $0.25 at IBKR and $1.99 at Futu, and it decides whether
+# maintaining constituent weights is worth doing at all.
+#   ibkr — IBKR Pro Fixed: 0.005/share, min 1.00, cap 1% (cap wins).
+#   futu — Futu HK fixed platform plan: commission 0.0049/share min 0.99 PLUS
+#          platform fee 0.005/share min 1.00 (so a 1.99 floor), cap 0.5% but
+#          the floor wins, plus 0.003/share settlement.
+#   none — commission-free routing; the 4bps spread assumption carries the bill.
+# Measured consequence of the choice, at $100k across 120 instruments over
+# 2018-2026 (backtests/reports/retail_cost_study.json): with no no-trade band
+# Futu costs 3.76%/yr against IBKR's 1.16%, and fractional shares flip from the
+# single largest improvement (+0.73pp CAGR at IBKR) to a 1.23pp LOSS, because
+# fractional targets generate a small order in every name every month and Futu
+# has no cap to make those cheap. Integer rounding accidentally acts as a
+# no-trade band there. At $25k the fractional-at-Futu case does not merely
+# underperform, it terminates: 15.9 rebalances a year x ~112 orders x ~$2 is
+# $2,896 in year one against $25,000 of capital, and the ledger ends at $2,987.
+broker: ibkr
 
 ibkr:
   host: 127.0.0.1

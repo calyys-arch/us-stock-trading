@@ -188,9 +188,7 @@ import pandas as pd
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-from python.portfolio.broker_costs import (  # noqa: E402
-    commission, min_notional_for_cost_ceiling,
-)
+from python.portfolio.broker_costs import load_schedule  # noqa: E402
 from python.portfolio.strategy_v1 import (  # noqa: E402
     COLLAPSE, DRIFT_BAND_BPS, band_exposure, bucket_weighted_gross, load_prices,
     load_universe, target_weights,
@@ -369,7 +367,8 @@ def main() -> int:
     invested = sum(r[4] for r in rows)
     target = args.capital * exposure
     drag = (target - invested) / target if target else 0.0
-    entry_commission = sum(commission(r[3], r[2]) for r in rows)
+    schedule = load_schedule()
+    entry_commission = sum(schedule.charge(r[3], r[2]) for r in rows)
     entry_spread = invested * ONE_WAY_COST_BPS / 10_000.0
     print("-" * 50)
     print(f"{'合計':<21}{'':>9}{'':>9}{invested:>11,.0f}")
@@ -411,7 +410,7 @@ def main() -> int:
     # per-order band itself -- it does not know what the account already holds.
     # What it can do is state the threshold, since that is the number the
     # operator needs in order to know which adjustments to leave alone.
-    thresholds = sorted(min_notional_for_cost_ceiling(r[2], DRIFT_BAND_BPS)
+    thresholds = sorted(schedule.min_notional_for_ceiling(r[2], DRIFT_BAND_BPS)
                         for r in rows)
     if thresholds and np.isfinite(thresholds[-1]):
         lo, hi = thresholds[0], thresholds[-1]
