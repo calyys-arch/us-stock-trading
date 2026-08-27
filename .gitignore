@@ -31,6 +31,10 @@ data/history_altuni_daily20/
 data/history_altuni_midcap_full/
 data/history_altuni_rank/
 data/history_gfc2008/
+# scripts/build_pit_universe.py's point-in-time-2016 survivorship-bias-free
+# universe cache — regenerable via yfinance, same posture as the other
+# data/history_*/ caches above.
+data/history_pit2016/
 data/ticks/
 data/depth/
 # scripts/snapshot_gex.py — naive options GEX as-of capture day. No
