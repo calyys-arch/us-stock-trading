@@ -13,6 +13,11 @@
 
 set -uo pipefail
 
+# launchd jobs have a much lower open-file limit than interactive shells.
+# 120 symbols = 120 CSV files to write, and pandas opens several internal
+# files per to_csv call. Raise the soft limit to match the hard limit.
+ulimit -n 4096 2>/dev/null || ulimit -n 2048 2>/dev/null || true
+
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO" || exit 1
 
