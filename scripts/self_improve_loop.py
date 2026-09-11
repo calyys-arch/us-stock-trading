@@ -63,11 +63,16 @@ from python.backtest.optimize import (
     max_oos_drawdown_threshold,
     preflight_check,
 )
+from python.backtest.param_guard import MAX_FREE_PARAMETERS, check_max_parameters
 from python.backtest.promotion import evaluate_and_promote
+from python.backtest.reality_check import RealityCheck, RealityCheckConfig
 from python.backtest.walk_forward import WalkForwardOptimizer
+from python.uhai import client as uhai_client
+from python.uhai import regime as uhai_regime
 
 STRATEGY_CONFIG_PATH = Path("configs/strategy.yaml")
 GOAL_PATH = Path("configs/goal.yaml")
+PARAM_GRIDS_PATH = Path("configs/param_grids.yaml")
 LOG_PATH = Path("backtests/reports/self_improvement_log.md")
 
 STRATEGIES = ["pairs_trading", "xsection_mean_reversion"]
@@ -115,6 +120,93 @@ def _build_backtest_fn(strategy: str, args, base_cfg: dict):
     return fn, label, universe_fingerprint(universe_cfg), sources
 
 
+def _load_grid_spec(strategy: str) -> dict:
+    """This strategy's raw block from configs/param_grids.yaml.
+
+    load_param_grid() returns the EXPANDED cross product; the suggester needs
+    the pre-expansion axes to read each one's range and value type.
+    """
+    return _load_yaml(PARAM_GRIDS_PATH).get(strategy, {})
+
+
+def _append_uhai_candidates(strategy: str, args, base_cfg: dict, param_grid: list[dict]) -> int:
+    """Extend `param_grid` in place with UHAI's suggestions. Returns how many
+    were added.
+
+    The fixed grid is always kept: it is the baseline this run is judged
+    against, and it must not depend on a service being up. Suggestions are
+    additive, and every one of them re-enters the SAME pipeline as a grid
+    candidate — per-fold IS re-optimization, OOS validation, and all five
+    gates. Nothing here shortcuts a verdict.
+
+    Each suggestion is re-checked against parameter discipline rather than
+    trusted: preflight_check already ran against the fixed grid, so a
+    suggestion arriving afterwards would otherwise be the one candidate in
+    the run that never met Chan's ceiling.
+    """
+    if args.disable_uhai:
+        return 0
+
+    grid_spec = _load_grid_spec(strategy)
+    try:
+        suggestions = uhai_client.suggest_params(
+            strategy,
+            base_cfg,
+            grid_spec,
+            n_suggestions=args.uhai_suggestions,
+            # A --demo run has only synthetic history to learn from; a real
+            # run must never fit on synthetic Sharpes.
+            include_synthetic_history=args.demo,
+        )
+    except Exception as exc:  # noqa: BLE001 — a suggester must never stop a run
+        log.warning("UHAI suggestions unavailable (%s) — fixed grid only", exc)
+        return 0
+
+    seen = {tuple(sorted(c.items())) for c in param_grid}
+    added = 0
+    for suggestion in suggestions:
+        unknown = set(suggestion) - set(base_cfg)
+        if unknown:
+            log.warning("UHAI: dropping suggestion with keys absent from strategy.yaml: %s",
+                        sorted(unknown))
+            continue
+
+        ok, n_free = check_max_parameters({**base_cfg, **suggestion})
+        if not ok:
+            log.warning("UHAI: dropping suggestion — merged config has %d free parameters "
+                        "(ceiling is %d)", n_free, MAX_FREE_PARAMETERS)
+            continue
+
+        key = tuple(sorted(suggestion.items()))
+        if key in seen:
+            continue
+        seen.add(key)
+        param_grid.append(suggestion)
+        added += 1
+
+    return added
+
+
+def _window_regime(close_panel: pd.DataFrame | None) -> str:
+    """Which regime this backtest window mostly sat in.
+
+    Takes the panel the Reality Check already built, so no prices are fetched
+    twice. Multi-column panels are averaged into one equal-weight series
+    first: the tag describes the window, not any single symbol.
+
+    Returns "unknown" rather than raising — a missing tag must not cost a run
+    its result, and --demo has no real prices to label.
+    """
+    if close_panel is None or len(close_panel) == 0:
+        return uhai_regime.UNKNOWN
+    try:
+        series = close_panel.mean(axis=1) if close_panel.ndim > 1 else close_panel
+        return uhai_regime.dominant_regime(series)
+    except Exception as exc:  # noqa: BLE001
+        log.warning("could not label this window's regime: %s", exc)
+        return uhai_regime.UNKNOWN
+
+
 def run_iteration(strategy: str, args, iteration: int, end_ts: pd.Timestamp) -> dict:
     """One optimize->validate->promote cycle for one strategy. Returns a
     summary dict for the markdown log."""
@@ -129,11 +221,16 @@ def run_iteration(strategy: str, args, iteration: int, end_ts: pd.Timestamp) -> 
     preflight = preflight_check(strategy, base_cfg, param_grid, total_trading_days=n_bdays)
     wfo_cfg = load_wfo_config(strategy)
 
+    n_grid = len(param_grid)
+    n_uhai = _append_uhai_candidates(strategy, args, base_cfg, param_grid)
+
     fn, data_label, uni_fp, data_source = _build_backtest_fn(strategy, args, base_cfg)
 
     print(f"\n=== iter {iteration} | {strategy} | window [{start_ts.date()}, {end_ts.date()}] "
           f"| {len(param_grid)} candidates ===")
     print(f"    data: {data_label}")
+    if n_uhai:
+        print(f"    candidates: {n_grid} fixed grid + {n_uhai} UHAI suggestion(s)")
 
     candidate_wfo = WalkForwardOptimizer(fn, wfo_cfg, param_grid).run(
         start_ts.to_pydatetime(), end_ts.to_pydatetime())
@@ -155,14 +252,84 @@ def run_iteration(strategy: str, args, iteration: int, end_ts: pd.Timestamp) -> 
     mc_result = MonteCarloValidator(n_sims=500).run(full_metrics.get("daily_returns", []))
     min_p5 = float(goal.get("monte_carlo", {}).get("min_p5_sharpe", 0.0))
 
+    # Reality Check: phase-randomize price panel to test if Sharpe could come from noise.
+    # Build adapter fn that takes a price panel and returns Sharpe with candidate params.
+    rc_result = None
+    close_panel = None  # reused below to tag this window's market regime
+    max_rc_p_value = float(goal.get("reality_check", {}).get("max_p_value", 0.05))
+    
+    if not args.demo:  # Reality Check needs real price data, skip for synthetic
+        try:
+            if strategy == "pairs_trading":
+                # Fetch the same price data that _build_backtest_fn used
+                from python.data.price_cache import get_cached_price_panel
+                panel, _, _ = get_cached_price_panel(
+                    [args.pair_a, args.pair_b], args.start, args.end, refresh=False)
+                prices_a = panel.xs(args.pair_a.upper(), level=1)["close"]
+                prices_b = panel.xs(args.pair_b.upper(), level=1)["close"]
+                close_panel = pd.DataFrame({"a": prices_a, "b": prices_b}).dropna()
+                
+                def rc_backtest_fn(randomized_panel: pd.DataFrame) -> float:
+                    """Adapter: takes (date, code) panel -> Sharpe with candidate params"""
+                    fn_adapted = build_pairs_backtest_fn(
+                        args.pair_a.upper(), args.pair_b.upper(),
+                        randomized_panel["a"], randomized_panel["b"], base_cfg)
+                    metrics = fn_adapted(start_ts.to_pydatetime(), end_ts.to_pydatetime(), candidate_params)
+                    return metrics.get("sharpe_ratio", 0.0)
+            else:
+                # xsection_mean_reversion
+                from python.data.fixed_universe import load_universe_config
+                from python.data.price_cache import get_cached_price_panel
+                universe_cfg = load_universe_config()
+                symbols = universe_cfg["symbols"]
+                panel, _, _ = get_cached_price_panel(symbols, args.start, args.end, refresh=False)
+                close_panel = panel["close"].unstack("code")
+                
+                def rc_backtest_fn(randomized_panel: pd.DataFrame) -> float:
+                    """Adapter: takes (date, code) panel -> Sharpe with candidate params"""
+                    # Rebuild multi-index panel from close_panel
+                    stacked = randomized_panel.stack().rename("close").to_frame()
+                    stacked.index.names = ["date", "code"]
+                    # Add dummy OHLV columns (vector_engine only needs close for this strategy)
+                    for col in ["open", "high", "low", "volume"]:
+                        stacked[col] = stacked["close"]
+                    
+                    fn_adapted = build_xsection_backtest_fn(stacked, symbols, base_cfg)
+                    metrics = fn_adapted(start_ts.to_pydatetime(), end_ts.to_pydatetime(), candidate_params)
+                    return metrics.get("sharpe_ratio", 0.0)
+            
+            rc = RealityCheck(rc_backtest_fn, config=RealityCheckConfig(
+                n_sims=500, pass_threshold=max_rc_p_value, seed=42))
+            # candidate_params was picked as the WFO winner out of the full
+            # searched grid (fixed grid + any UHAI suggestions) — len(param_grid)
+            # candidates competed to produce it. Passing that count applies a
+            # Bonferroni correction (see python/backtest/reality_check.py's
+            # module docstring) so a wider search is held to a
+            # correspondingly higher bar, at zero extra backtest_fn calls.
+            rc_result = rc.run(close_panel, n_candidates_searched=len(param_grid))
+            log.info("RealityCheck: p_value=%.4f (raw=%.4f, x%d candidates) verdict=%s",
+                     rc_result.p_value, rc_result.raw_p_value,
+                     rc_result.n_candidates_searched, rc_result.verdict)
+        except Exception as e:
+            log.warning("RealityCheck failed (skipping gate): %s", e)
+            rc_result = None
+
     gates = {
         "wfo_go": candidate_wfo.decision == "GO",
         "oos_drawdown_within_limit": check_drawdown_gate(
             candidate_wfo, max_oos_drawdown_threshold()),
         "has_oos_trades": check_has_trades_gate(candidate_wfo),
         "monte_carlo_p5_sharpe": mc_result.sharpe.p5 >= min_p5,
+        "reality_check_pass": rc_result.verdict == "PASS" if rc_result else True,  # pass if skipped
     }
     min_improvement = float(goal.get("live_promotion", {}).get("min_oos_sharpe_improvement", 0.0))
+
+    # Descriptive tag on the record: which regime this window mostly was.
+    # Recorded so a later run can ask "what did these parameters score the
+    # last time the market looked like this"; no gate reads it, so it cannot
+    # change this run's verdict. Reuses the panel the Reality Check already
+    # fetched rather than pulling prices again.
+    regime = _window_regime(close_panel)
 
     baseline_params = {k: base_cfg[k] for k in candidate_params}
     record = evaluate_and_promote(
@@ -183,6 +350,7 @@ def run_iteration(strategy: str, args, iteration: int, end_ts: pd.Timestamp) -> 
         universe_fingerprint=uni_fp,
         data_source=data_source,
         iteration=iteration,
+        extra={"market_regime": regime},
     )
 
     print(f"    baseline OOS Sharpe: {baseline_wfo.oos_sharpe_mean:+.3f} "
@@ -287,6 +455,10 @@ def main() -> None:
                         help="report-only: never modify configs/strategy.yaml")
     parser.add_argument("--refresh-data", action="store_true",
                         help="force re-fetch of cached price data")
+    parser.add_argument("--disable-uhai", action="store_true",
+                        help="disable UHAI smart parameter suggestions (use base grid only)")
+    parser.add_argument("--uhai-suggestions", type=int, default=5,
+                        help="number of UHAI parameter suggestions to request (default: 5)")
     args = parser.parse_args()
 
     if args.demo:

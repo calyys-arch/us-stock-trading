@@ -128,10 +128,16 @@ def evaluate_and_promote(
     universe_fingerprint: str = "",
     data_source: str = "",
     iteration: int = 0,
+    extra: dict | None = None,
 ) -> PromotionRecord:
     """Apply the promotion policy and (when it passes and `write_config`)
     write the candidate back to configs/strategy.yaml. Always appends the
-    decision to the JSONL history."""
+    decision to the JSONL history.
+
+    `extra` is free-form context recorded alongside the decision (e.g. the
+    market regime the window fell in). It is descriptive only — nothing in the
+    promotion policy reads it, so adding a key here can never change a
+    verdict."""
     failed_gates = sorted(name for name, ok in gates.items() if not ok)
     improvement = candidate_oos_sharpe - baseline_oos_sharpe
 
@@ -180,6 +186,7 @@ def evaluate_and_promote(
         data_source=data_source,
         config_written=config_written,
         iteration=iteration,
+        extra=dict(extra or {}),
     )
     append_history(record, path=history_path)
     log.info("promotion[%s]: %s — %s", strategy_name, decision, reason)

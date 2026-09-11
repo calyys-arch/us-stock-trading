@@ -20,7 +20,9 @@ silent no-op, not an error):
          (candidate_params actually tested).
   - backtests/logs/promotion_history.jsonl (python/backtest/promotion.py)
       -> subject "strategy:<name>", predicate "hadPromotionDecision"
-         (PROMOTED/REJECTED + gates + before/after Sharpe).
+         (PROMOTED/REJECTED + gates + before/after Sharpe + the candidate
+         parameter set tested + the market regime the window sat in, if
+         scripts/self_improve_loop.py recorded one).
   - configs/universe.yaml               (scripts/refresh_universe.py /
       manual picks)
       -> subject "universe:fixed_universe", predicate "asOf" (symbol list +
@@ -160,16 +162,31 @@ def _events_from_promotion_history(state: dict) -> list[dict]:
         except json.JSONDecodeError:
             log.warning("sync_uhai: skipping malformed promotion_history.jsonl line")
             continue
+        extra = record.get("extra") or {}
         events.append({
             "subject": f"strategy:{record.get('strategy', 'unknown')}",
             "predicate": "hadPromotionDecision",
             "object_json": json.dumps({
                 "decision": record.get("decision"),
                 "reason": record.get("reason"),
+                # The parameter set actually tested — without this a
+                # "parameter test result" event carries no parameters, only
+                # the verdict on them. Needed to ever answer "what did we try
+                # and what did it score" from the graph side.
+                "candidate_params": record.get("candidate_params"),
                 "candidate_oos_sharpe": record.get("candidate_oos_sharpe"),
                 "baseline_oos_sharpe": record.get("baseline_oos_sharpe"),
                 "gates": record.get("gates"),
                 "config_written": record.get("config_written"),
+                "data_source": record.get("data_source"),
+                # Which regime (Bull/Bear/Sideways/unknown) the tested window
+                # mostly sat in — python/uhai/regime.py via
+                # scripts/self_improve_loop.py. Descriptive only; this event
+                # is read via microstructure::queryMicroEvents as an opaque
+                # JSON payload, never parsed back into structured params (GCL
+                # has no JSON parser), so it is safe to carry here even
+                # though it is not queryable by field.
+                "market_regime": extra.get("market_regime"),
             }, default=str),
             "source": "promotion.py",
             "ts": record.get("timestamp") or datetime.now(timezone.utc).isoformat(),

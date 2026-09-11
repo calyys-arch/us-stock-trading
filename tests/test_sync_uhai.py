@@ -115,6 +115,44 @@ def test_promotion_history_incremental_sync(sync_uhai):
     assert json.loads(events2[0]["object_json"])["decision"] == "PROMOTED"
 
 
+def test_promotion_event_carries_the_tested_parameters(sync_uhai):
+    """A 'parameter test result' event with no parameters in it is not one —
+    this is what makes the graph side able to answer "what did we try"."""
+    record = {"strategy": "pairs_trading", "decision": "REJECTED", "reason": "gates failed",
+               "candidate_params": {"entry_z": 2.2, "exit_z": 0.5},
+               "candidate_oos_sharpe": 0.4, "baseline_oos_sharpe": 0.3,
+               "gates": {"wfo": False}, "config_written": False,
+               "timestamp": "2026-07-01T00:00:00Z"}
+    sync_uhai.PROMOTION_HISTORY_PATH.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    events, _state = sync_uhai.collect_events(reset=False)
+    obj = json.loads(events[0]["object_json"])
+    assert obj["candidate_params"] == {"entry_z": 2.2, "exit_z": 0.5}
+
+
+def test_promotion_event_carries_the_market_regime_tag_when_present(sync_uhai):
+    record = {"strategy": "pairs_trading", "decision": "REJECTED", "reason": "gates failed",
+               "candidate_params": {"entry_z": 2.2}, "candidate_oos_sharpe": 0.4,
+               "baseline_oos_sharpe": 0.3, "gates": {"wfo": False}, "config_written": False,
+               "extra": {"market_regime": "Bull"}, "timestamp": "2026-07-01T00:00:00Z"}
+    sync_uhai.PROMOTION_HISTORY_PATH.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    events, _state = sync_uhai.collect_events(reset=False)
+    assert json.loads(events[0]["object_json"])["market_regime"] == "Bull"
+
+
+def test_promotion_event_market_regime_is_absent_gracefully_on_old_records(sync_uhai):
+    """Records written before the tag existed have no `extra` key at all."""
+    record = {"strategy": "pairs_trading", "decision": "REJECTED", "reason": "gates failed",
+               "candidate_params": {"entry_z": 2.2}, "candidate_oos_sharpe": 0.4,
+               "baseline_oos_sharpe": 0.3, "gates": {"wfo": False}, "config_written": False,
+               "timestamp": "2026-07-01T00:00:00Z"}
+    sync_uhai.PROMOTION_HISTORY_PATH.write_text(json.dumps(record) + "\n", encoding="utf-8")
+
+    events, _state = sync_uhai.collect_events(reset=False)
+    assert json.loads(events[0]["object_json"])["market_regime"] is None
+
+
 def test_universe_config_watermarked_by_computed_at(sync_uhai):
     _write_universe(sync_uhai, computed_at="2026-07-28")
     events1, state1 = sync_uhai.collect_events(reset=False)
