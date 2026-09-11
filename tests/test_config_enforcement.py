@@ -179,14 +179,24 @@ def test_configs_yaml_files_are_valid_and_have_required_keys():
         assert "enabled" in strat_cfg[strat], f"{strat} missing enabled key"
 
     # 2026-08-15 paper-forward experiment: auto_execute: true is allowed
-    # ONLY for absorption_breakout (frozen NO-GO-but-closest forward test)
-    # and pairs_trading (regime-gated, 2022 GO evidence). This is NOT a
-    # WFO GO promotion. Every retired / confirmed-losing microstructure
-    # name must stay false.
+    # ONLY for absorption_breakout (frozen NO-GO-but-closest forward test).
+    # This is NOT a WFO GO promotion. Every retired / confirmed-losing
+    # microstructure name must stay false.
+    #
+    # pairs_trading was also allowlisted (regime-gated, 2022 GO evidence)
+    # until 2026-09-11, when it was RETIRED: direct diagnosis found the
+    # entry_z=4.0 threshold is never actually reachable on real XLE/XOP
+    # data (cointegration gate clears only 9/81 checkpoints; realized
+    # |z| tops out at ~3.43 even then), and the repo-wide 368-pair scan
+    # (backtests/reports/pairs_scan_report.md) independently reached
+    # NO-GO. It must now assert False like every other non-allowlisted
+    # strategy — see python/core/paper_forward.py's module docstring.
     from python.core.paper_forward import PAPER_AUTO_ALLOWLIST, RETIRED_MICRO_SIGNALS
 
     assert strat_cfg["absorption_breakout"]["auto_execute"] is True
-    assert strat_cfg["pairs_trading"]["auto_execute"] is True
+    assert strat_cfg["pairs_trading"]["auto_execute"] is False
+    assert strat_cfg["pairs_trading"]["enabled"] is False
+    assert "pairs_trading" not in PAPER_AUTO_ALLOWLIST
     for name, block in strat_cfg.items():
         if not isinstance(block, dict) or "auto_execute" not in block:
             continue

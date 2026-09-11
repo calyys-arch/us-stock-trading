@@ -1,10 +1,17 @@
-"""Paper-forward experiment wiring (2026-08-15).
+"""Paper-forward experiment wiring (2026-08-15, updated 2026-09-11).
 
 NOT a WFO GO promotion. Pins: LIVE_SIGNALS is only absorption_breakout;
 retired names cannot auto-execute; macro beta gate fail-closes on missing
 index bars; pairs regime gate blocks a synthetic trend and allows a
 synthetic mean-reverting series; ExecutionGateway only auto-executes the
 allowlisted names.
+
+`pairs_trading` was retired 2026-09-11 and removed from
+PAPER_AUTO_ALLOWLIST (see python/core/paper_forward.py's module
+docstring for why). The regime-gate / LivePairsScheduler tests below
+still exercise that module's own logic directly (it remains valid,
+documented infrastructure) — only the config-driven auto-execution
+wiring tests were updated to reflect that it is no longer armed.
 """
 from __future__ import annotations
 
@@ -66,11 +73,12 @@ def test_live_signals_is_only_absorption_breakout():
 
 
 def test_paper_auto_allowlist_excludes_retired():
-    assert PAPER_AUTO_ALLOWLIST == frozenset({"absorption_breakout", "pairs_trading"})
+    assert PAPER_AUTO_ALLOWLIST == frozenset({"absorption_breakout"})
     assert PAPER_AUTO_ALLOWLIST.isdisjoint(RETIRED_MICRO_SIGNALS)
     armed = _load_paper_auto_strategies()
-    assert armed == {"absorption_breakout", "pairs_trading"}
+    assert armed == {"absorption_breakout"}
     assert armed.isdisjoint(RETIRED_MICRO_SIGNALS)
+    assert "pairs_trading" not in armed  # retired 2026-09-11
 
 
 def test_retired_signals_cannot_auto_execute_even_if_gateway_armed():
@@ -84,7 +92,8 @@ def test_retired_signals_cannot_auto_execute_even_if_gateway_armed():
         bus, broker, mode="auto",
         auto_execute_strategies=_load_paper_auto_strategies(),
     )
-    assert gw._auto_execute_strategies == {"absorption_breakout", "pairs_trading"}
+    assert gw._auto_execute_strategies == {"absorption_breakout"}
+    assert "pairs_trading" not in gw._auto_execute_strategies  # retired 2026-09-11
     for retired in RETIRED_MICRO_SIGNALS:
         assert retired not in gw._auto_execute_strategies
 
@@ -130,13 +139,20 @@ def test_gateway_auto_executes_only_allowlisted_absorption_breakout():
     assert reports[0]["strategy"] == "absorption_breakout"
 
 
-def test_gateway_auto_executes_only_allowlisted_pairs():
+def test_gateway_no_longer_auto_executes_retired_pairs_trading():
+    """pairs_trading was retired 2026-09-11 and removed from
+    PAPER_AUTO_ALLOWLIST (python/core/paper_forward.py). Even with the
+    gateway in "auto" mode and configs/strategy.yaml's own auto_execute
+    flag flipped back to false (its current, correct state), a spread
+    order tagged pairs_trading must not result in a position — same
+    invariant as test_gateway_rejects_xsection_even_in_auto_mode."""
     bus = MessageBus()
     broker = SimBroker()
     gw = ExecutionGateway(
         bus, broker, mode="auto",
         auto_execute_strategies=_load_paper_auto_strategies(),
     )
+    assert "pairs_trading" not in gw._auto_execute_strategies
     order = QualifiedSpreadOrder(
         raw=_spread("pairs_trading"), qty_a=10, qty_b=10, gross_notional=2000.0,
         estimated_cost=0.0, kelly_fraction_used=0.003, approved=True,
@@ -148,7 +164,7 @@ def test_gateway_auto_executes_only_allowlisted_pairs():
 
     asyncio.run(_run())
     pos = broker.get_positions()
-    assert pos.get("AAA", 0) != 0 or pos.get("BBB", 0) != 0
+    assert pos.get("AAA", 0) == 0 and pos.get("BBB", 0) == 0
 
 
 def test_gateway_rejects_xsection_even_in_auto_mode():
@@ -420,10 +436,11 @@ def test_enable_auto_trading_arms_only_allowlisted_names():
         return await runtime.enable_auto_trading()
 
     armed = asyncio.run(_run())
-    assert armed == {"absorption_breakout", "pairs_trading"}
+    assert armed == {"absorption_breakout"}
     assert runtime.gateway.mode == "auto"
     assert runtime.gateway._auto_execute_strategies == armed
     assert runtime.state.armed_strategies == sorted(armed)
+    assert "pairs_trading" not in armed  # retired 2026-09-11
     for retired in RETIRED_MICRO_SIGNALS:
         assert retired not in armed
 

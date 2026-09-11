@@ -1,12 +1,23 @@
 """
-Paper-forward-test allowlists (2026-08-15).
+Paper-forward-test allowlists (2026-08-15, updated 2026-09-11).
 
 This is NOT a WFO GO promotion. `absorption_breakout` remains a frozen
-NO-GO-but-closest candidate under a 30–60 trading-day forward experiment;
-`pairs_trading` is regime-conditional automation based on the 2022 GO
-evidence in `backtests/reports/regime_generalization_report.md`. See
-`backtests/reports/absorption_breakout_paper_protocol.md` and
-`backtests/reports/pairs_regime_live_protocol.md`.
+NO-GO-but-closest candidate under a 30–60 trading-day forward experiment.
+See `backtests/reports/absorption_breakout_paper_protocol.md`.
+
+`pairs_trading` was regime-conditional automation based on the 2022 GO
+evidence in `backtests/reports/regime_generalization_report.md` — RETIRED
+2026-09-11 and removed from this allowlist. Direct diagnosis on real
+XLE/XOP data found the pair only clears the cointegration gate at 9/81
+revalidation checkpoints, with realized |z-score| never exceeding ~3.43
+(below entry_z=4.0) even then, and the repo-wide 368-pair scan
+(`backtests/reports/pairs_scan_report.md`) independently reached NO-GO.
+Flipping `configs/strategy.yaml`'s `pairs_trading.auto_execute` back to
+`true` alone will NOT re-arm it — it must also be re-added here, which
+should only happen alongside a new, dated protocol document, same as any
+other strategy re-promotion. See
+`backtests/reports/pairs_regime_live_protocol.md` for the retired
+protocol this replaces.
 
 Retired / confirmed-losing microstructure signals must never appear in
 `LIVE_SIGNALS` and must never be granted `auto_execute` at the gateway,
@@ -20,10 +31,10 @@ ABSORPTION_BREAKOUT_UNIVERSE: tuple[str, ...] = (
     "AAPL", "GOOGL", "NVDA", "MSFT", "PLTR", "INTC",
 )
 
-# The only two names that may be armed for paper auto-execution.
+# The only name currently armed for paper auto-execution. `pairs_trading`
+# was removed 2026-09-11 (retired, see module docstring).
 PAPER_AUTO_ALLOWLIST: frozenset[str] = frozenset({
     "absorption_breakout",
-    "pairs_trading",
 })
 
 # Confirmed-losing / RETIRED microstructure signals — live footguns.

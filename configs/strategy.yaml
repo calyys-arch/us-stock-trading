@@ -16,14 +16,26 @@
 # are pinned a-priori in code, because this block is already exactly at the
 # Chan Ch.3 five-free-parameter ceiling.
 pairs_trading:
-  enabled: true
-  # PAPER forward experiment, regime-gated — NOT a WFO GO promotion.
-  # Armed only when the trend-efficiency gate says mean-reversion-friendly
-  # (automatically OFF in a 2024–2026-like bull/trend). See
-  # backtests/reports/pairs_regime_live_protocol.md and
-  # backtests/reports/regime_generalization_report.md §2b (2022 GO,
-  # low-frequency entry_z=4.0).
-  auto_execute: true
+  # RETIRED 2026-09-11. Removed from python/core/paper_forward.py's
+  # PAPER_AUTO_ALLOWLIST at the same time — flipping this flag back to
+  # true alone will NOT re-arm live paper execution.
+  #
+  # Reasoning: (1) direct diagnosis this session on real XLE/XOP data
+  # (2019-2026) found the pair only clears the is_tradeable cointegration
+  # gate at 9 of 81 revalidation checkpoints, and even within those
+  # windows the realized |z-score| never exceeds ~3.43 — mathematically
+  # below this entry_z=4.0 threshold, so the "2022 GO" config has not
+  # produced a single live-eligible entry signal in practice on this
+  # pair since. (2) backtests/reports/pairs_scan_report.md's 368-pair
+  # scan independently reached NO-GO on both development and holdout:
+  # best variant nets +$30.84/trade gross edge against a $53.83/trade
+  # cost floor even at zero spread. (3) backtests/reports/
+  # strategy_review_summary.md's repo-wide review found this pattern
+  # (grid search cannot rescue a fundamentally NO-GO edge) across all 8
+  # strategies/signals ever tested here. Kept in this file (not deleted)
+  # as a frozen, documented reference config — see pairs_regime_live_protocol.md.
+  enabled: false
+  auto_execute: false
   entry_z: 4.0                   # frozen 2022 GO low-frequency config (was 2.0 baseline)
   exit_z: 0.5
   coint_lookback_days: 252
@@ -36,7 +48,18 @@ pairs_trading:
   allow_overnight: true          # confirmed constraint: pairs may hold overnight
 
 xsection_mean_reversion:
-  enabled: true
+  # RETIRED 2026-09-11 (was already auto_execute: false — never live; this
+  # additionally marks the strategy itself as no longer an active research
+  # candidate). Root cause per strategy_review_summary.md §2.2: baseline
+  # OOS Sharpe -0.492 (negative, not just "not enough" positive edge) — the
+  # 1-day cross-sectional reversal effect this strategy trades is a
+  # well-documented, mostly-arbitraged-away anomaly in liquid mega-cap
+  # names (AAPL/NVDA/MSFT-class), competed away by HFT/stat-arb desks long
+  # before this repo tested it. Re-confirmed this session end-to-end on a
+  # fresh real-data run (20-symbol universe, 2019-2026): WFO passed only
+  # 5/18 folds, both baseline and candidate OOS Sharpe negative, Reality
+  # Check FAIL. Kept in this file as a frozen, documented reference config.
+  enabled: false
   auto_execute: false
   lookback_days: 1
   gross_leverage_target: 1.0

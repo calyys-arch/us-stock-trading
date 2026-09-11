@@ -97,6 +97,10 @@ def _load_paper_auto_strategies() -> set[str]:
     (b) `enabled: true`, and (c) PAPER_AUTO_ALLOWLIST. Retired
     microstructure names are excluded even if a human later flips their
     yaml flag — that is the live footgun this function exists to close.
+    `pairs_trading` retired 2026-09-11 (removed from PAPER_AUTO_ALLOWLIST,
+    see python/core/paper_forward.py) is covered the same way: even if
+    someone flips its yaml `auto_execute` back to true, it stays excluded
+    here because it is no longer in PAPER_AUTO_ALLOWLIST.
     This is a paper-forward-test / regime-gated arm, NOT a WFO GO
     promotion.
     """
