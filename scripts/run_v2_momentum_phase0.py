@@ -126,6 +126,32 @@ def _largecap_single_name_symbols() -> list[str]:
     return sorted(s for s in long_hist if s not in etf_symbols)
 
 
+def _load_close_and_dollar_volume_multi(
+    sources: list[tuple[Path, list[str]]],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Combine multiple (cache_dir, symbols) sources into one cross-section
+    — used by --universe combined to test whether the midcap/largecap
+    arms' individually-insignificant winner-loser spread (2026-09-11
+    Phase 0 run) was a genuine null or just an underpowered small-N test.
+    A symbol present in more than one source is taken from the FIRST
+    source that has it (midcap arm wins the one actual overlap, "D")."""
+    closes: dict[str, pd.Series] = {}
+    dollar_vols: dict[str, pd.Series] = {}
+    for cache_dir, symbols in sources:
+        for sym in symbols:
+            if sym in closes:
+                continue
+            path = cache_dir / f"{sym}.csv"
+            if not path.exists():
+                continue
+            df = pd.read_csv(path, parse_dates=["date"]).set_index("date").sort_index()
+            if df.empty or "close" not in df.columns:
+                continue
+            closes[sym] = df["close"].astype(float)
+            dollar_vols[sym] = (df["close"].astype(float) * df["volume"].astype(float))
+    return pd.DataFrame(closes).sort_index(), pd.DataFrame(dollar_vols).sort_index()
+
+
 def _load_close_and_dollar_volume(cache_dir: Path, symbols: list[str]) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Direct CSV reads — deliberately NOT python.data.price_cache's
     get_cached_price_panel, because that function will attempt a NETWORK
@@ -341,7 +367,7 @@ def _verdict(result: dict) -> str:
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--universe", choices=["midcap", "largecap", "both"], default="both")
+    parser.add_argument("--universe", choices=["midcap", "largecap", "both", "combined"], default="both")
     parser.add_argument("--top-quantile", type=float, default=DEFAULT_TOP_QUANTILE)
     parser.add_argument("--bottom-quantile", type=float, default=DEFAULT_BOTTOM_QUANTILE)
     parser.add_argument("--vol-target", type=float, default=DEFAULT_VOL_TARGET)
@@ -356,12 +382,23 @@ def main() -> None:
         universes["midcap"] = (MIDCAP_DIR, syms)
     if args.universe in ("largecap", "both"):
         universes["largecap"] = (LARGECAP_DIR, _largecap_single_name_symbols())
+    if args.universe == "combined":
+        mid_syms = sorted(p.stem for p in MIDCAP_DIR.glob("*.csv"))
+        large_syms = _largecap_single_name_symbols()
+        universes["combined"] = ("MULTI", [(MIDCAP_DIR, mid_syms), (LARGECAP_DIR, large_syms)])
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     all_results = {}
-    for name, (cache_dir, symbols) in universes.items():
-        log.info("=== %s: %d symbols from %s ===", name, len(symbols), cache_dir)
-        close_panel, dv_panel = _load_close_and_dollar_volume(cache_dir, symbols)
+    for name, spec in universes.items():
+        if name == "combined":
+            cache_dir, sources = spec
+            symbols = sorted({s for _, syms in sources for s in syms})
+            log.info("=== %s: %d unique symbols from %d sources ===", name, len(symbols), len(sources))
+            close_panel, dv_panel = _load_close_and_dollar_volume_multi(sources)
+        else:
+            cache_dir, symbols = spec
+            log.info("=== %s: %d symbols from %s ===", name, len(symbols), cache_dir)
+            close_panel, dv_panel = _load_close_and_dollar_volume(cache_dir, symbols)
         result = run_phase0(
             close_panel, dv_panel,
             top_quantile=args.top_quantile, bottom_quantile=args.bottom_quantile,
