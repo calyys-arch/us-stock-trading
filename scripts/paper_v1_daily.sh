@@ -41,6 +41,13 @@ if [ $status -ne 0 ]; then
     echo "FAILED with exit code $status" >>"$LOG"
 else
     "$REPO/.venv/bin/python" scripts/paper_track_v1.py --report >>"$LOG" 2>&1
+    # Early-read percentile check (scripts/paper_v1_early_read.py): informative
+    # from day 1, unlike --report's MIN_DAYS_FOR_VERDICT=250 gate. Its own
+    # failure must NOT flip this job's exit status -- the ledger update above
+    # already succeeded and is the record that matters; the early-read is a
+    # monitoring convenience layered on top, not part of the ledger itself.
+    "$REPO/.venv/bin/python" scripts/paper_v1_early_read.py >>"$LOG" 2>&1 \
+        || echo "早期讀數失敗（不影響帳本，已記錄於上方）" >>"$LOG"
 fi
 
 exit $status
