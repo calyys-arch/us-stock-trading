@@ -95,25 +95,61 @@ until it crosses 2.0 (that would be p-hacking with extra steps, the same
 failure mode `docs/v2_research_plan.md` already documents guarding against
 for the Bayesian-suggester UHAI feature).
 
-## 4. Recommendation
+## 4a. Robustness sweep (2026-09-15, same day) — this closes the question
 
-**Do not proceed to a Phase 1** (larger universe / longer history / real
-static graph / hyperparameter search) on the strength of this one run.
-The result is a NO-GO by the pre-declared bar, and the model's much larger
-hypothesis space makes "try a few more configurations" a materially
-riskier move here than it was for momentum or 8-K drift — the same
-multiple-comparisons concern the user raised earlier this session about
-Bayesian parameter search applies with more force to a model this size on
-data this small (88 training cross-sections is not enough to responsibly
-tune thousands of weights).
+The user asked, reasonably, whether it was worth pursuing G-Mamba further
+given every hand-crafted strategy tried this month has also come back
+NO-GO. Before committing to a full Phase 1 (new universe, real graph,
+days of data engineering), the cheap check was run first: same
+architecture, same data, same 21-day embargo — only the random seed or the
+train/val split point changed. `scripts/run_gmamba_phase0.py` now takes
+`--train-fraction` for this.
 
-If this is ever revisited, it should only be with: (a) a genuinely larger,
-point-in-time-correct universe (500+ names, not 127 ad-hoc ones), (b) a
-real structural graph (sector/ETF co-holding, not an all-zero
-placeholder), and (c) a pre-registered, single hyperparameter
-configuration tested exactly once against a fresh, never-before-touched
-validation window — the same one-shot discipline `scripts/design_wfo_gate.py`
-already established for this repo's existing gates.
+| Run | mean daily IC | IC t-stat | Verdict |
+|---|---|---|---|
+| seed 42, split 70/30 (section 2, original) | **+0.058** | 1.47 | NO-GO |
+| seed 7, split 70/30 | **-0.035** | -1.11 | NO-GO |
+| seed 123, split 70/30 | **-0.020** | -0.64 | NO-GO |
+| seed 42, split 60/40 (earlier cut, 50 val samples) | +0.058 | 1.72 | NO-GO |
+| seed 42, split 80/20 (later cut, 25 val samples) | +0.077 | 1.70 | NO-GO |
+
+**The sign of the mean IC flips between +0.058 and -0.035 from changing
+only the random weight initialization**, on the exact same data, same
+split, same architecture. That is decisive: a genuine cross-sectional
+effect would not reverse sign under a different training seed. The
+original run's t=1.47 was noise from one lucky initialization, not a
+stable property of the model or the data. (The two split-point variants
+both reused seed 42, so they are not independent confirmations of anything
+— they inherit that same seed's draw, which is why they land in the same
+ballpark as the original instead of near zero like seeds 7/123 do.)
+
+**This answers the user's question directly: G-Mamba-lite on this data is
+not "closer to working than the others," it is exhibiting exactly the
+symptom section 3 warned about** — a high-capacity model producing an
+apparently-stronger but actually less trustworthy number than a simple
+rule, because there is nothing in the underlying 88-127 training
+cross-sections for its ~10,000 weights to converge on consistently.
+
+## 4. Recommendation — closed, not just hedged
+
+**Stop here. Do not proceed to a Phase 1.** This was the specific question
+the user asked to have answered before committing to real data-engineering
+effort (larger universe, real graph), and section 4a answers it: the
+signal is not stable across random seeds, which is a stronger and cheaper
+disqualifier than "t-stat below 2." A model whose own sign flips under
+re-initialization on identical data has nothing for a larger universe or a
+real graph to amplify — those would change the data and architecture, not
+fix an instability that lives in "10,000 weights, 88 training points."
+
+This also retroactively answers the question that motivated running this
+at all ("every hand-crafted strategy is NO-GO, so try something with more
+capacity"): the reasoning was backwards. More capacity on the same small,
+already-shown-to-be-thin dataset does not produce a more reliable answer;
+it produces a noisier one that merely *looks* more like a signal on any
+single run. If a future idea in this direction is worth trying, it needs
+new data (a genuinely larger, point-in-time-correct universe; a real
+structural graph) BEFORE a model this size is fit again — not a bigger
+model on the same 127 names.
 
 ## 5. What stays useful regardless of this verdict
 

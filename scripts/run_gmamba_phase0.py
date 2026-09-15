@@ -268,7 +268,7 @@ def tercile_spread(y_hat: torch.Tensor, y: torch.Tensor, mask: torch.Tensor) -> 
     return spreads
 
 
-def run_phase0(epochs: int, seed: int) -> dict:
+def run_phase0(epochs: int, seed: int, train_fraction: float = TRAIN_FRACTION) -> dict:
     torch.manual_seed(seed)
     np.random.seed(seed)
 
@@ -282,7 +282,7 @@ def run_phase0(epochs: int, seed: int) -> dict:
     log.info("Built %d cross-sectional samples over %d symbols, %s .. %s",
               n_samples, n_symbols, as_of_dates[0].date(), as_of_dates[-1].date())
 
-    n_train = int(n_samples * TRAIN_FRACTION)
+    n_train = int(n_samples * train_fraction)
     n_embargo = max(1, EMBARGO_DAYS // STRIDE_DAYS)
     val_start = n_train + n_embargo
     if val_start >= n_samples - 5:
@@ -349,6 +349,7 @@ def run_phase0(epochs: int, seed: int) -> dict:
         "n_features": n_features,
         "epochs": epochs,
         "seed": seed,
+        "train_fraction": train_fraction,
         "train_loss_final": train_losses[-1],
         "val_loss_final": val_losses[-1],
         "val_date_range": [str(val_dates[0].date()), str(val_dates[-1].date())],
@@ -377,14 +378,18 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--epochs", type=int, default=DEFAULT_EPOCHS)
     parser.add_argument("--seed", type=int, default=DEFAULT_SEED)
+    parser.add_argument("--train-fraction", type=float, default=TRAIN_FRACTION,
+                        help="chronological train split point, for split-sensitivity checks "
+                             "(docs/gmamba_phase0_results.md \u00a76 robustness sweep)")
     args = parser.parse_args()
 
-    result = run_phase0(args.epochs, args.seed)
+    result = run_phase0(args.epochs, args.seed, args.train_fraction)
     verdict = _verdict(result)
     result["verdict"] = verdict
 
     OUT_DIR.mkdir(parents=True, exist_ok=True)
-    out_path = OUT_DIR / f"phase0_seed{args.seed}_epochs{args.epochs}.json"
+    tf_tag = f"_tf{args.train_fraction:.2f}" if args.train_fraction != TRAIN_FRACTION else ""
+    out_path = OUT_DIR / f"phase0_seed{args.seed}_epochs{args.epochs}{tf_tag}.json"
     out_path.write_text(json.dumps(result, indent=2, default=str), encoding="utf-8")
 
     log.info("")
