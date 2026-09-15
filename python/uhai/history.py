@@ -201,6 +201,58 @@ def load_history(
     return records
 
 
+def load_latest_raw_record(
+    strategy: str,
+    *,
+    path: Path = PROMOTION_HISTORY_PATH,
+    include_synthetic: bool = False,
+) -> dict | None:
+    """The most recent RAW promotion_history.jsonl entry for `strategy`,
+    unparsed (unlike load_history/HistoryRecord, which keep only the fields
+    the GP suggester needs and drop everything else — gates, reason,
+    wfo_summary, extra).
+
+    For explain.explain_decision(), which needs the full record (gate-by-gate
+    pass/fail, the human-written `reason`, market_regime) to build a useful
+    prompt, not just (params, sharpe). Returns None if there is no matching,
+    well-formed record — a missing/empty history is "nothing to explain",
+    not an error.
+
+    Same synthetic-data guard as load_history: a --demo run's rejection
+    reason is not informative about real trading and must not be surfaced by
+    default as if it were.
+    """
+    if not path.exists():
+        return None
+
+    latest: dict | None = None
+    latest_ts: float | None = None
+
+    for line in path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if not isinstance(entry, dict) or entry.get("strategy") != strategy:
+            continue
+
+        data_source = str(entry.get("data_source", ""))
+        if data_source.lower() in _SYNTHETIC_SOURCES and not include_synthetic:
+            continue
+
+        ts = _parse_timestamp(entry.get("timestamp", ""))
+        if ts is None:
+            continue
+
+        if latest_ts is None or ts >= latest_ts:
+            latest, latest_ts = entry, ts
+
+    return latest
+
+
 def to_sidecar_payload(records: list[HistoryRecord]) -> list[dict]:
     """Shape records for POST /optimize/suggest-params."""
     return [
