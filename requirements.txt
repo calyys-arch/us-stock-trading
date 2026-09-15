@@ -35,3 +35,9 @@ pytest-asyncio>=0.23
 
 # Optional Phase-3 ML classifier
 # lightgbm>=4.0
+
+# Optional research spike only (scripts/run_gmamba_phase0.py,
+# python/research/gmamba_lite.py) -- NOT a runtime dependency of any
+# live/paper-trading path. Install with:
+#   pip install torch --index-url https://download.pytorch.org/whl/cpu
+# torch>=2.0
