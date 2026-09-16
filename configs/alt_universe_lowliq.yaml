@@ -1,0 +1,44 @@
+# Low-liquidity research universe — built 2026-09-16 to test whether
+# intraday microstructure signals (sweep_reclaim, vwap_band_fade, etc.,
+# all RETIRED/NO-GO on configs/universe.yaml's 20-name mega-cap universe)
+# fail because that universe is too liquid/crowded for a technical pattern
+# to still carry edge, vs. failing for a more fundamental reason (signal
+# design or the flat-cost-model assumption). See the chat/thread that
+# produced this file for the full falsification write-up.
+#
+# Research artifact, NOT configs/universe.yaml — nothing reads this file by
+# default and no production/live/paper path is affected by it. Pass
+# `--universe-config configs/alt_universe_lowliq.yaml` to
+# scripts/run_intraday_backtest.py to use it.
+#
+# Selection method: screened 20 non-biotech, non-recent-IPO small/mid-cap
+# US common stocks (yfinance, 6mo trailing daily avg dollar volume as of
+# 2026-09-16), picked the 5 with the lowest liquidity that still clear a
+# ~$300k/day minimum average share-volume floor (to avoid 1-minute bars
+# being so sparse the signals literally cannot fire), spread across 5
+# distinct sectors to avoid one industry's idiosyncrasies dominating the
+# result. This is one clear liquidity tier BELOW alt_universe_midcap.yaml
+# ($109M-$160M/day band) and far below configs/universe.yaml's mega-caps.
+fixed_universe:
+  symbols:
+  - ANDE
+  - FIZZ
+  - HWKN
+  - LZB
+  - OFG
+  top_n: 5
+  ranking_metric: trailing_6mo_avg_dollar_volume_lowest_band_above_300k_shares_per_day_floor
+  computed_at: '2026-09-16'
+  source_pool: manual_pick_nonbiotech_smallcap_5_sectors_screened_by_yfinance_dollar_volume
+  avg_daily_dollar_volume_usd_2026_09_16_screen:
+    ANDE: 24750000
+    FIZZ: 11610000
+    HWKN: 24740000
+    LZB: 19450000
+    OFG: 14780000
+  sectors:
+    ANDE: agribusiness
+    FIZZ: consumer_staples_beverages
+    HWKN: specialty_chemicals_industrials
+    LZB: consumer_discretionary_furniture
+    OFG: financials_banking

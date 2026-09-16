@@ -306,9 +306,10 @@ def _load_bars_for_args(args) -> tuple[dict, str, pd.Timestamp, pd.Timestamp]:
         end_ts = pd.Timestamp("2025-01-02") + pd.Timedelta(days=140)
         return bars_by_symbol, data_label, start_ts, end_ts
 
-    from python.data.fixed_universe import load_universe_config
+    from python.data.fixed_universe import UNIVERSE_CONFIG_PATH, load_universe_config
 
-    universe_cfg = load_universe_config()
+    universe_path = getattr(args, "universe_config", None) or UNIVERSE_CONFIG_PATH
+    universe_cfg = load_universe_config(path=universe_path)
     symbols = universe_cfg["symbols"]
     bars_by_symbol = _load_real_bars(symbols, args.start, args.end)
     if not bars_by_symbol:
@@ -316,8 +317,8 @@ def _load_bars_for_args(args) -> tuple[dict, str, pd.Timestamp, pd.Timestamp]:
             f"no cached 1-minute bars for any universe symbol in [{args.start}, {args.end}] — "
             "run scripts/backfill_intraday.py first"
         )
-    data_label = (f"fixed top-{universe_cfg['top_n']} universe "
-                  f"(computed_at={universe_cfg['computed_at']}), 1m bars via data/history_1m/")
+    data_label = (f"fixed top-{universe_cfg['top_n']} universe (source={universe_path}, "
+                  f"computed_at={universe_cfg['computed_at']}), 1m bars via data/history_1m/")
     start_ts, end_ts = pd.Timestamp(args.start), pd.Timestamp(args.end)
     return bars_by_symbol, data_label, start_ts, end_ts
 
@@ -593,7 +594,19 @@ def _render_signal_section(r: dict) -> list[str]:
     return lines
 
 
-def write_report(results: list[dict]) -> Path:
+def _suffixed(path: Path, suffix: str | None) -> Path:
+    """Append `_<suffix>` before the extension (e.g. intraday_backtest_report.md
+    -> intraday_backtest_report_lowliq.md) so a research run against a
+    non-default universe (--universe-config / --report-suffix) can never
+    silently clobber a prior honest NO-GO writeup produced against the
+    default universe. `suffix=None`/"" returns `path` unchanged."""
+    if not suffix:
+        return path
+    return path.with_name(f"{path.stem}_{suffix}{path.suffix}")
+
+
+def write_report(results: list[dict], report_suffix: str | None = None) -> Path:
+    out_path = _suffixed(REPORT_PATH, report_suffix)
     lines = [
         "# Intraday Microstructure Signal Backtest Report",
         "",
@@ -608,9 +621,9 @@ def write_report(results: list[dict]) -> Path:
     for r in results:
         lines.extend(_render_signal_section(r))
 
-    REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    REPORT_PATH.write_text("\n".join(lines), encoding="utf-8")
-    return REPORT_PATH
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    return out_path
 
 
 def write_report_json(results: list[dict], path: Path = REPORT_JSON_PATH) -> Path:
@@ -625,12 +638,13 @@ def write_report_json(results: list[dict], path: Path = REPORT_JSON_PATH) -> Pat
     return path
 
 
-def write_new_signals_report(results: list[dict]) -> Path:
+def write_new_signals_report(results: list[dict], report_suffix: str | None = None) -> Path:
     """New signal hypotheses (2026-08-06) — SEPARATE file from
     REPORT_PATH/intraday_backtest_report.md so the original three-signal
     report's content stays exactly as it was (docs/microstructure_pivot_plan.md
     §4c discipline: report every phase's results honestly, never overwrite
     a prior honest NO-GO writeup)."""
+    out_path = _suffixed(NEW_REPORT_PATH, report_suffix)
     lines = [
         "# New Intraday Signal Hypotheses — Backtest Report",
         "",
@@ -655,9 +669,9 @@ def write_new_signals_report(results: list[dict]) -> Path:
     for r in results:
         lines.extend(_render_signal_section(r))
 
-    NEW_REPORT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    NEW_REPORT_PATH.write_text("\n".join(lines), encoding="utf-8")
-    return NEW_REPORT_PATH
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    out_path.write_text("\n".join(lines), encoding="utf-8")
+    return out_path
 
 
 def write_l2_absorption_report(results: list[dict]) -> Path:
@@ -786,6 +800,20 @@ def main() -> None:
     parser.add_argument("--demo", action="store_true", help="offline synthetic 1m bars (no IB/cache required)")
     parser.add_argument("--start", default="2025-08-01")
     parser.add_argument("--end", default="2026-07-01")
+    parser.add_argument("--universe-config", default=None,
+                         help="override which fixed_universe YAML to load symbols from "
+                              "(default: configs/universe.yaml). E.g. "
+                              "configs/alt_universe_lowliq.yaml for the low-liquidity "
+                              "research universe. Ignored when --demo is set.")
+    parser.add_argument("--report-suffix", default=None,
+                         help="append _<suffix> to every output report filename "
+                              "(e.g. --report-suffix lowliq -> "
+                              "intraday_backtest_report_lowliq.md / "
+                              "new_signals_report_lowliq.json). REQUIRED in practice "
+                              "whenever --universe-config points away from the default "
+                              "universe, so a research run against a different universe "
+                              "can never silently overwrite the checked-in default-universe "
+                              "NO-GO report.")
     parser.add_argument("--full-grid", action="store_true",
                          help="also run an exhaustive per-candidate grid search for every signal run "
                               "(default: only for a signal whose main run's WFO decision is GO or has a "
@@ -798,6 +826,20 @@ def main() -> None:
                               "backtests/reports/signal_status.md). Naming an individual signal explicitly "
                               "(`--signal sweep_reclaim`, etc.) never needs this flag — it always runs.")
     args = parser.parse_args()
+
+    from python.data.fixed_universe import UNIVERSE_CONFIG_PATH
+    if (not args.demo and args.universe_config
+            and Path(args.universe_config) != Path(UNIVERSE_CONFIG_PATH)
+            and not args.report_suffix):
+        print(
+            f"ERROR: --universe-config {args.universe_config} points away from the default "
+            f"({UNIVERSE_CONFIG_PATH}) but no --report-suffix was given — refusing to run, "
+            "because every report writer in this script defaults to the SAME checked-in "
+            "path regardless of which universe produced the results, and would silently "
+            "overwrite the existing default-universe NO-GO writeup. Pass e.g. "
+            "--report-suffix lowliq."
+        )
+        sys.exit(1)
 
     if args.signal in ("all", "new"):
         if not args.include_retired:
@@ -837,23 +879,23 @@ def main() -> None:
 
     if args.signal in L2_ABSORPTION_SIGNALS:
         out_path = write_l2_absorption_report(results)
-        json_path = write_report_json(results, path=L2_REPORT_JSON_PATH)
+        json_path = write_report_json(results, path=_suffixed(L2_REPORT_JSON_PATH, args.report_suffix))
     elif args.signal in AUCTION_RECLAIM_SIGNALS:
         out_path = write_auction_reclaim_report(results)
-        json_path = write_report_json(results, path=AUCTION_RECLAIM_REPORT_JSON_PATH)
+        json_path = write_report_json(results, path=_suffixed(AUCTION_RECLAIM_REPORT_JSON_PATH, args.report_suffix))
     elif args.signal in VSA_EFFORT_SIGNALS:
         out_path = write_vsa_effort_report(results)
-        json_path = write_report_json(results, path=VSA_EFFORT_REPORT_JSON_PATH)
+        json_path = write_report_json(results, path=_suffixed(VSA_EFFORT_REPORT_JSON_PATH, args.report_suffix))
     elif args.signal in VOLUME_BOOK_SIGNALS:
         results = _merge_volume_book_results(results)
         out_path = write_volume_book_report(results)
-        json_path = write_report_json(results, path=VOLUME_BOOK_REPORT_JSON_PATH)
+        json_path = write_report_json(results, path=_suffixed(VOLUME_BOOK_REPORT_JSON_PATH, args.report_suffix))
     elif is_new:
-        out_path = write_new_signals_report(results)
-        json_path = write_report_json(results, path=NEW_REPORT_JSON_PATH)
+        out_path = write_new_signals_report(results, report_suffix=args.report_suffix)
+        json_path = write_report_json(results, path=_suffixed(NEW_REPORT_JSON_PATH, args.report_suffix))
     else:
-        out_path = write_report(results)
-        json_path = write_report_json(results, path=REPORT_JSON_PATH)
+        out_path = write_report(results, report_suffix=args.report_suffix)
+        json_path = write_report_json(results, path=_suffixed(REPORT_JSON_PATH, args.report_suffix))
     print(f"\nReport written to {out_path} (machine-readable: {json_path})")
     for r in results:
         print(f"  {r['signal']}: {r['decision']}")

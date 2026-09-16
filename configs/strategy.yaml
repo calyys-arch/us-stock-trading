@@ -90,6 +90,14 @@ fvg_retest:
   vol_mult: 2.0                # impulse bar volume must exceed this x the 20-bar average
   entry_pct: 0.5                # limit order placed at this fraction into the gap (0.5 = midpoint)
   expiry_bars: 10               # cancel the resting limit order after this many bars unfilled
+  # 2026-09-16 cost-to-edge rescue investigation (docs/fvg_retest_rescue_report.md)
+  # levers, added mirroring orb_vwap's rescue — both default to the exact
+  # pre-existing behavior (unlimited entries; 1:1 R:R target), so this line
+  # alone changes nothing about the shipped configuration. Together with the
+  # three params above this is 5 free parameters, exactly at
+  # python/backtest/param_guard.py's MAX_FREE_PARAMETERS ceiling.
+  max_entries_per_session: null # null = unlimited (pre-existing behavior)
+  target_r_multiple: 1.0        # 1.0 = the pre-existing hardcoded 1:1 stop-mirrored target
   allow_overnight: false
   flatten_buffer_minutes: 5
 

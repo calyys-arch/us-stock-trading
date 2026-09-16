@@ -58,7 +58,12 @@ from ..microstructure.signals.vwap_band_fade import evaluate_vwap_band_fade
 
 SIGNAL_PARAM_KEYS = {
     "sweep_reclaim": ["sweep_min_atr", "reclaim_bars", "stop_atr_mult"],
-    "fvg_retest": ["vol_mult", "entry_pct", "expiry_bars"],
+    # max_entries_per_session / target_r_multiple added 2026-09-16 by a
+    # cost-to-edge rescue investigation mirroring orb_vwap's (see
+    # python/microstructure/signals/fvg_retest.py's module docstring) —
+    # both default to the pre-existing exact behavior (unlimited entries;
+    # 1:1 R:R target), so nothing about the shipped configuration changed.
+    "fvg_retest": ["vol_mult", "entry_pct", "expiry_bars", "max_entries_per_session", "target_r_multiple"],
     # max_entries_per_session / stop_atr_buffer_mult / target_r_multiple were
     # added by the 2026-08-13 cost-to-edge rescue investigation
     # (backtests/reports/orb_vwap_rescue_report.md). All three default to
