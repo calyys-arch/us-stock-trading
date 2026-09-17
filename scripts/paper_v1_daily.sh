@@ -38,6 +38,11 @@ fi
 status=$?
 
 if [ $status -ne 0 ]; then
+    # Includes a mid-run halt (stale price past MAX_CARRY_DAYS, missing VIX
+    # data, or a single-day move past CATASTROPHE_DAY_RETURN) -- not just an
+    # outright crash. scripts/paper_track_v1.py returns non-zero in every one
+    # of those cases specifically so this branch, not the report/early-read
+    # branch below, is the one that runs.
     echo "FAILED with exit code $status" >>"$LOG"
 else
     "$REPO/.venv/bin/python" scripts/paper_track_v1.py --report >>"$LOG" 2>&1

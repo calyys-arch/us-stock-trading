@@ -107,6 +107,18 @@ sum(returns) >= 0, so it would restate "the account is down" as if it were an
 independent test. Below a few hundred days no verdict is available in either
 direction, and --report refuses to imply one.
 
+THAT 250-DAY WAIT IS FOR A DIFFERENT QUESTION THAN "IS THERE A BUG." It answers
+"does the live Sharpe roughly match the walk-forward's 0.91", which needs
+enough days that dispersion stops swamping the estimate -- there is no
+shortcut there. It says nothing about "did a bug or a bad price just blow a
+hole in the account", which needs no day count at all: CATASTROPHE_DAY_RETURN
+below halts THIS SCRIPT, unconditionally, from day 1, the moment one day's
+mark-to-market move exceeds what this rule has ever produced across a
+GFC-adjacent decade (see its own comment for the number and its source). It is
+deliberately a much cruder, much faster tripwire than the 250-day verdict --
+by design it can only catch a single violent day, not a slow bleed from a
+consistently-wrong small charge, which is still the 250-day check's job.
+
 THE VIX OVERLAY IS A SEPARATE LEDGER, NOT A SWITCH ON THIS ONE. `--vix-overlay`
 plus `--journal-path` runs the exact same day-by-day replay against a second,
 independent journal that starts on its own --init date with its own 250-day
@@ -160,6 +172,24 @@ MIN_DAYS_FOR_VERDICT = 250
 # universe is frozen and liquid, so a gap this long is a data fault, not a
 # delisting, and marking off a week-old price is not defensible.
 MAX_CARRY_DAYS = 5
+# A single-day mark-to-market move past this halts the run, unconditionally --
+# no day count required, no comparison to history. This is NOT the same
+# question scripts/paper_v1_early_read.py asks ("is this an unusual return for
+# this strategy"); it asks "is this move even physically plausible for a
+# 120-name, cross-asset, vol-targeted book", which needs no history at all to
+# answer. Reconstructing this rule's full daily path over 2018-09-07 to
+# 2026-09-16 (2,630 sessions, python/portfolio/strategy_v1.py's exact
+# weighting/exposure/band logic) found a worst day of -6.82% (2020-03-09, the
+# COVID crash) and a best day of +6.58% (2025-04-09, the tariff-pause rally) --
+# nothing else came within 2pp of either. 10% is comfortably outside anything
+# this rule has produced across a GFC-adjacent decade that includes both, so a
+# live day past it is far more likely a bad price, a doubled cost charge, or an
+# exposure that broke its cap than a real market move -- worth stopping and
+# looking at, not worth trading through. A slow multi-day bleed from a
+# consistent-but-wrong per-day charge would NOT trip this (each single day
+# looks ordinary); that failure mode is what --report's drawdown/Sharpe check
+# and paper_v1_early_read.py's percentile check exist to catch instead.
+CATASTROPHE_DAY_RETURN = 0.10
 
 
 def _short(path: Path) -> str:
@@ -503,6 +533,19 @@ def _run(args: argparse.Namespace) -> int:
     print(f"帳本在 {last_date.date()}，價格到 {panel.index[-1].date()}，"
           f"補 {len(pending)} 個交易日\n")
 
+    # Anchor for the per-day catastrophe check below -- the last equity this
+    # ledger actually recorded, updated after each day this loop successfully
+    # processes (not after each price top-up).
+    equity_prev = float(last["equity"])
+    # Set by any `break` below that stops the replay partway through `pending`.
+    # Every one of those already refuses to write the offending day and prints
+    # why -- but until this flag existed, the function still returned 0
+    # afterwards (see the bottom of this function), so paper_v1_daily.sh's
+    # `status=$?` check saw a false success and ran --report / early-read as
+    # if nothing had happened. A halt that only shows up if someone reads the
+    # log is not a halt for any purpose that matters here.
+    halted = False
+
     for day in pending:
         upto = panel.loc[:day]
         prices, stale = _marks(upto, day)
@@ -515,6 +558,7 @@ def _run(args: argparse.Namespace) -> int:
             print(f"  {day.date()}  停在這裡：{', '.join(sorted(held_too_stale))} "
                   f"已超過 {MAX_CARRY_DAYS} 個交易日沒有新價格。")
             print(f"  先修好價格資料再跑，不要讓一筆無法辯護的紀錄永久寫進帳本。")
+            halted = True
             break
         if stale:
             carried = {s: n for s, n in stale.items() if s in holdings}
@@ -527,6 +571,25 @@ def _run(args: argparse.Namespace) -> int:
                                          ONE_WAY_COST_BPS)
         realized, want = _wanted_exposure(gross, target_vol)
         equity, invested = _equity(holdings, prices, cash)
+
+        # Unconditional circuit breaker: does not compare to history (that is
+        # paper_v1_early_read.py's job), just asks whether this mark is even
+        # plausible. See CATASTROPHE_DAY_RETURN's definition for the empirical
+        # basis. Checked on the PRE-TRADE mark, before today's rebalance
+        # decision is even made, so a bad price or a corrupted holding is
+        # caught before it can influence a trade.
+        day_ret = (equity / equity_prev - 1.0) if equity_prev > 0 else 0.0
+        if abs(day_ret) > CATASTROPHE_DAY_RETURN:
+            print(f"  {day.date()}  停在這裡：單日權益變動 {day_ret:+.2%}"
+                  f"（${equity_prev:,.0f} -> ${equity:,.0f}），超過 "
+                  f"{CATASTROPHE_DAY_RETURN:.0%} 門檻。")
+            print(f"  這不是跟歷史統計比較異不異常，是這條規則 2018-2026 全歷史"
+                  f"重建（含 2020-03 崩盤）都沒出現過的單日變動幅度——更可能是"
+                  f"價格資料錯誤、成本算重複，或曝險破了上限，不是正常市況。")
+            print(f"  先查清楚再繼續，不要把一筆無法辯護的紀錄永久寫進帳本。")
+            halted = True
+            break
+
         held = invested / equity if equity > 0 else 0.0
 
         # Constituents drift with prices; the backtest silently re-weighted
@@ -554,6 +617,7 @@ def _run(args: argparse.Namespace) -> int:
                       f"^VIX 值（ffill 也補不到）。VIX 疊加需要每天的 VIX 值才能"
                       f"算縮放，寧可停在這裡也不要假設 scalar=1.0（那等於假設"
                       f"市場平靜，恰好是這個機制最不該在不確定時做的假設）。")
+                halted = True
                 break
             vix_scalar = vix_exposure_scalar(vix_today)
             target_final = target * vix_scalar
@@ -643,10 +707,16 @@ def _run(args: argparse.Namespace) -> int:
                 else round(applied_final, 4))
         _append(entry)
         last_date = day
+        equity_prev = equity
         print(f"  {day.date()}  {action:<10} 權益 ${equity:>11,.0f}  "
               f"曝險 {held:>5.2f}  成本 ${cost:>8,.2f}  {entry['reason']}")
 
     print(f"\n寫入 {_short(JOURNAL)}")
+    if halted:
+        print("停在一半：以上某天觸發了停止條件，還有交易日沒有處理。"
+              "查清楚原因、需要的話修好資料，再重跑（append-only，"
+              "已經寫入的日子不會重複寫）。")
+        return 1
     return 0
 
 

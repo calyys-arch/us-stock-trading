@@ -329,13 +329,59 @@ def test_the_run_stops_rather_than_writing_a_mark_it_cannot_defend(
     blanked = ledger.copy()
     blanked.loc[blanked.index[301]:, "CMD"] = np.nan
     monkeypatch.setattr(pt, "load_prices", lambda s: blanked.iloc[:320])
-    pt._run(_args())
+    status = pt._run(_args())
     out = capsys.readouterr().out
 
     assert "停在這裡" in out
     dates = [r["date"] for r in _entries()]
     # Advanced up to the carry limit, then stopped instead of guessing.
     assert str(blanked.index[301 + pt.MAX_CARRY_DAYS].date()) not in dates
+    # A halt partway through `pending` must not report success: this used to
+    # fall through to `return 0` regardless of how the loop ended, so
+    # paper_v1_daily.sh's `status=$?` check saw a false success and went on
+    # to run --report / early-read as if every pending day had been written.
+    assert status == 1
+
+
+def test_a_single_day_move_past_the_catastrophe_threshold_halts_the_run(
+        ledger, monkeypatch, capsys):
+    """CATASTROPHE_DAY_RETURN is the unconditional tripwire: no history
+    lookup, no day-count minimum, just "is this mark even plausible."""
+    monkeypatch.setattr(pt, "load_prices", lambda s: ledger.iloc[:300])
+    pt._run(_args(init=True))
+    monkeypatch.setattr(pt, "load_prices", lambda s: ledger.iloc[:301])
+    pt._run(_args())  # enters the book
+
+    spiked = ledger.copy()
+    blow_up_day = spiked.index[303]
+    # CMD is the book's only commodity name and therefore a whole 25%-weight
+    # bucket on its own (see the bucket-weights test above); a 6x spike there
+    # moves total equity by roughly +125% in one day regardless of what the
+    # other three buckets do, far past the 10% threshold.
+    spiked.loc[blow_up_day, "CMD"] *= 6.0
+    monkeypatch.setattr(pt, "load_prices", lambda s: spiked.iloc[:305])
+    status = pt._run(_args())
+    out = capsys.readouterr().out
+
+    assert status == 1
+    assert "停在這裡" in out
+    assert f"{pt.CATASTROPHE_DAY_RETURN:.0%}" in out
+    dates = [r["date"] for r in _entries()]
+    assert str(blow_up_day.date()) not in dates, \
+        "the implausible mark must not be written to the append-only journal"
+
+
+def test_ordinary_daily_moves_never_trip_the_catastrophe_threshold(
+        ledger, monkeypatch):
+    """The fixture's own random walk (1.2% daily vol per name, diversified
+    across four equal buckets) must never come near a 10% single-day swing --
+    otherwise the threshold would be firing on ordinary noise, not bugs."""
+    monkeypatch.setattr(pt, "load_prices", lambda s: ledger.iloc[:300])
+    pt._run(_args(init=True))
+    monkeypatch.setattr(pt, "load_prices", lambda s: ledger)
+    status = pt._run(_args())
+    assert status == 0
+    assert len(_entries()) == 1 + (len(ledger) - 300)
 
 
 def test_commission_is_charged_per_order_not_as_a_flat_rate_on_notional():
