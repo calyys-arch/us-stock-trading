@@ -76,6 +76,14 @@
 - VIX 是前瞻指標（期權隱含波動率）
 - GFC 回測顯示，VIX overlay 可將回撤從 -56% 降到 -30%
 
+> **2026-09-17 訂正**：上面這條「GFC 回測顯示」是張冠李戴，寫這句話的時候
+> `adjust_exposure_for_vix` 從未被實際跑過（下面 `run_v1_vix_study.py` 標的
+> 「待完成」就是證據）。-56% → -30% 其實是 `backtests/reports/vol_target_gfc_stress.json`
+> 裡完全不含 VIX 的純波動率目標機制的數字。VIX overlay 本身直到 2026-09-17
+> 才第一次被正確跑過，真正的結果（全歷史 + 獨立的 GFC 壓力測試，兩組都通過
+> 「同平均曝險不擇時」控制組這關）見 `backtests/reports/v1_vix_validation_report.md`——
+> 結論是有真實、非曝險假象的改善，但仍未接進 `scripts/strategy_v1_positions.py`。
+
 **使用**：
 ```python
 from python.portfolio.risk_controls import adjust_exposure_for_vix
@@ -85,7 +93,10 @@ from python.portfolio.risk_controls import adjust_exposure_for_vix
 adjusted = adjust_exposure_for_vix(base_exposure, vix)
 ```
 
-**狀態**：✅ 已完成並測試，**未整合到 paper ledger**（需先確認回測改善再上線）
+**狀態**：✅ 已完成並測試，**未整合到 paper ledger**。2026-09-17：回測改善已確認（見上方
+訂正框與 `backtests/reports/v1_vix_validation_report.md`）——全歷史與 GFC 壓力測試兩組
+獨立比較都顯示真實改善，且通過同曝險控制組檢驗。仍未接進 `scripts/strategy_v1_positions.py`
+/ `scripts/paper_track_v1.py`，接線與否是獨立的後續決定，不在這次驗證範圍內。
 
 ---
 
@@ -201,7 +212,8 @@ result = simulate_limit_fills(orders, price_range)
 us-stock-trading/
 ├── scripts/
 │   ├── report_v1_monthly.py         ← 新增（月度報告）
-│   └── run_v1_vix_study.py          ← 新增（VIX 回測，待完成）
+│   ├── run_v1_vix_study.py          ← 新增（VIX 回測；2026-09-17 修正兩個 bug 後才第一次真正跑完）
+│   └── run_v1_vix_gfc_stress.py     ← 2026-09-17 新增（GFC 壓力測試）
 ├── python/portfolio/
 │   └── risk_controls.py             ← 新增（風控模組）
 ├── tests/
@@ -226,7 +238,8 @@ us-stock-trading/
 ### 中期（1-3 個月）
 4. ⏳ **V1 驗證**：90 日後，對比回測預期
 5. ⏳ **V2 概念驗證**：500 檔 momentum 回測
-6. ⏳ **決定是否整合 VIX overlay**：如果 V1 表現不如預期
+6. ⏳ **決定是否整合 VIX overlay**：2026-09-17 驗證已顯示真實改善（見上方訂正框），
+   接不接線是獨立的上線決定，需另外規劃如何接進 `strategy_v1_positions.py`/`paper_track_v1.py`
 
 ### 長期（3+ 個月）
 7. ⏳ **V2 上線**（如果通過）：紙上交易 3-6 個月

@@ -5,6 +5,12 @@ Forward paper record for Strategy V1. No broker, no orders -- an honest ledger.
     .venv/bin/python scripts/paper_track_v1.py            # run daily/weekly
     .venv/bin/python scripts/paper_track_v1.py --report
 
+    # Parallel VIX-overlay ledger (separate 250-day clock, starts empty):
+    .venv/bin/python scripts/paper_track_v1.py --init --capital 100000 \
+        --journal-path data/paper_v1_vix/journal.jsonl --vix-overlay
+    .venv/bin/python scripts/paper_track_v1.py \
+        --journal-path data/paper_v1_vix/journal.jsonl --vix-overlay
+
 WHY THIS AND NOT IBKR PAPER. V1 holds for weeks and turns over a few dozen
 times a year, so realistic fills are worth little here: cost is a rounding
 error against the holding period. What is actually unknown is whether the
@@ -100,6 +106,18 @@ these: on a daily return series PF >= 1 is algebraically identical to
 sum(returns) >= 0, so it would restate "the account is down" as if it were an
 independent test. Below a few hundred days no verdict is available in either
 direction, and --report refuses to imply one.
+
+THE VIX OVERLAY IS A SEPARATE LEDGER, NOT A SWITCH ON THIS ONE. `--vix-overlay`
+plus `--journal-path` runs the exact same day-by-day replay against a second,
+independent journal that starts on its own --init date with its own 250-day
+clock -- it does not touch, resume from, or backfill the primary ledger.
+Multiplying by python/portfolio/risk_controls.py's VIX-bracket scalar happens
+AFTER band_exposure() has already decided the volatility-target exposure for
+the day; the VIX scalar is not itself banded, because it can change on any day
+VIX crosses a bracket and that change must be traded and costed honestly, not
+absorbed by a band designed for a different rule. Neither flag has any effect
+unless passed explicitly, and the default journal path and default trading
+logic are unchanged when they are not.
 """
 from __future__ import annotations
 
@@ -116,6 +134,7 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
 from python.portfolio.broker_costs import load_schedule  # noqa: E402
+from python.portfolio.risk_controls import vix_exposure_scalar  # noqa: E402
 from python.portfolio.strategy_v1 import (  # noqa: E402
     COLLAPSE, DRIFT_BAND_BPS, band_exposure, bucket_weighted_gross, load_prices,
     load_universe, target_weights,
@@ -363,10 +382,59 @@ def _top_up() -> None:
     print()
 
 
+def _fetch_vix(panel_start: pd.Timestamp, panel_end: pd.Timestamp) -> pd.Series:
+    """One-shot ^VIX close series covering the whole panel span, for
+    --vix-overlay.
+
+    VIX is a single symbol, not the 120-name universe, so it does not need
+    _top_up()'s cache/retry machinery: one fetch_daily_bars call covers
+    whatever this run needs to replay, and that call costs one HTTP round
+    trip regardless of how wide the window is -- there is no saving in
+    narrowing it to just the pending days, and starting near the panel's own
+    first date (like scripts/run_v1_vix_study.py does) gives the per-day
+    lookup something to fall back on if a session or two is missing.
+
+    Raises whatever fetch_daily_bars raises (network failure, no data, etc).
+    The caller decides what "can't get VIX" means for the ledger; this
+    function does not swallow the failure or invent a fallback value.
+    """
+    from python.simulation.hist_data_us import fetch_daily_bars
+
+    start = (panel_start - pd.Timedelta(days=10)).strftime("%Y-%m-%d")
+    # yfinance treats `end` as EXCLUSIVE; +1 day so the last session is
+    # included, same convention as _top_up()'s `want + pd.Timedelta(days=1)`.
+    end = (panel_end + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+    print(f"更新 VIX（{start} 到 {end}）...", flush=True)
+    df = fetch_daily_bars("^VIX", start, end)
+    vix = df["close"].rename("VIX")
+    print(f"  ^VIX：{len(vix)} 日，{vix.index[0].date()} 到 {vix.index[-1].date()}\n")
+    return vix
+
+
+def _vix_on_or_before(vix: pd.Series, day: pd.Timestamp) -> float:
+    """Last known ^VIX close on or before `day`; NaN if none exists.
+
+    This IS the ffill this ledger is willing to do: carry the last real
+    print forward. It is not willing to carry forward across a gap that
+    starts before any real print exists -- that returns NaN, and the caller
+    stops the run rather than assuming the market was calm (scalar 1.0),
+    which is exactly the assumption this whole mechanism exists to avoid
+    making blindly.
+    """
+    eligible = vix.loc[:day]
+    return float(eligible.iloc[-1]) if len(eligible) else float("nan")
+
+
 def _run(args: argparse.Namespace) -> int:
     symbols, bucket_of = load_universe()
     panel = load_prices(symbols)
     journal = _read()
+    # getattr, not args.vix_overlay: tests/test_exposure_band_is_one_rule.py
+    # (and possibly other callers) build a bare `Args` stand-in with only the
+    # attributes THEY need, predating this flag. Defaulting to False here
+    # keeps every such caller's behavior exactly what it was before this flag
+    # existed, instead of an AttributeError.
+    vix_overlay = getattr(args, "vix_overlay", False)
 
     if args.init:
         if journal:
@@ -402,6 +470,14 @@ def _run(args: argparse.Namespace) -> int:
     if applied is None:
         applied = last.get("exposure_target")
     applied = None if applied is None else float(applied)
+    # The VIX overlay's OWN anchor: the last exposure this run actually traded
+    # to, AFTER the VIX-bracket scalar. Deliberately separate from `applied`
+    # above -- that one is band_exposure()'s anchor and must stay pre-VIX, or
+    # the vol-target band (designed for drifting weights) would silently
+    # absorb VIX regime changes it was never asked to gate. Only meaningful
+    # under --vix-overlay; None/absent otherwise.
+    applied_final = last.get("exposure_applied_final")
+    applied_final = None if applied_final is None else float(applied_final)
 
     pending = panel.index[panel.index > last_date]
     if not len(pending):
@@ -412,6 +488,17 @@ def _run(args: argparse.Namespace) -> int:
         else:
             print("下一個美股收盤後再跑就會推進。")
         return 0
+
+    vix_series = None
+    if vix_overlay:
+        try:
+            vix_series = _fetch_vix(panel.index[0], panel.index[-1])
+        except Exception as exc:
+            print(f"  VIX 抓取失敗，停在這裡：{exc}")
+            print("  --vix-overlay 需要每個交易日的 ^VIX 值才能算曝險縮放，"
+                  "寧可停在這裡也不要假設 scalar=1.0（那等於假設市場平靜，"
+                  "恰好是這個機制最不該在不確定時做的假設）。")
+            return 1
 
     print(f"帳本在 {last_date.date()}，價格到 {panel.index[-1].date()}，"
           f"補 {len(pending)} 個交易日\n")
@@ -454,8 +541,44 @@ def _run(args: argparse.Namespace) -> int:
         if not holdings:
             target, band_tripped = want, True
 
+        # VIX overlay: multiply the ALREADY-BANDED target by that day's
+        # VIX-bracket scalar. The scalar itself is never banded -- it can
+        # change any day VIX crosses a bracket, and that change must be
+        # traded and costed for real, not absorbed by the 10% vol-target
+        # band, which is a different rule for a different signal.
+        vix_today = vix_scalar = target_final = float("nan")
+        if vix_overlay:
+            vix_today = _vix_on_or_before(vix_series, day)
+            if not np.isfinite(vix_today):
+                print(f"  {day.date()}  停在這裡：抓不到 {day.date()} 或更早的 "
+                      f"^VIX 值（ffill 也補不到）。VIX 疊加需要每天的 VIX 值才能"
+                      f"算縮放，寧可停在這裡也不要假設 scalar=1.0（那等於假設"
+                      f"市場平靜，恰好是這個機制最不該在不確定時做的假設）。")
+                break
+            vix_scalar = vix_exposure_scalar(vix_today)
+            target_final = target * vix_scalar
+
+        decision_target = target_final if vix_overlay else target
+
         action, cost = "hold", 0.0
-        if np.isfinite(target) and (band_tripped or monthly):
+        trade_now = False
+        if vix_overlay:
+            # `band_tripped` / `monthly` decide the vol-target layer; VIX gets
+            # its own trigger because it can move on a day neither of those
+            # fires, and that move must not be suppressed by a band built for
+            # a different signal. Epsilon guards against re-trading on
+            # floating-point noise when the scalar is unchanged.
+            stale_applied = (applied_final is None or
+                             not np.isfinite(applied_final))
+            vix_drifted = stale_applied or (
+                abs(decision_target - applied_final) >
+                1e-6 * max(abs(applied_final), 1e-9))
+            trade_now = np.isfinite(decision_target) and (
+                band_tripped or monthly or vix_drifted)
+        else:
+            trade_now = np.isfinite(decision_target) and (band_tripped or monthly)
+
+        if trade_now:
             # Decide the label from the state BEFORE trading; afterwards
             # holdings is always non-empty and every entry reads "rebalance".
             first_time = not holdings
@@ -465,13 +588,31 @@ def _run(args: argparse.Namespace) -> int:
             # only drifted pays the band and mostly does nothing.
             ceiling = None if (band_tripped or first_time) else DRIFT_BAND_BPS
             holdings, cash, cost = _trade_to(holdings, prices, weights,
-                                             equity, target, ceiling)
+                                             equity, decision_target, ceiling)
             action = "enter" if first_time else "rebalance"
             equity, invested = _equity(holdings, prices, cash)
             held = invested / equity if equity > 0 else 0.0
             applied = target
+            if vix_overlay:
+                applied_final = target_final
         elif not np.isfinite(target):
             action = "warmup"
+
+        if action == "enter":
+            reason = "首次進場"
+        elif action == "rebalance":
+            if band_tripped:
+                reason = "曝險帶觸發"
+            elif monthly:
+                reason = "月度成分再平衡"
+            elif vix_overlay:
+                reason = "VIX 分級變動觸發"
+            else:
+                reason = "月度成分再平衡"
+        elif action == "warmup":
+            reason = "波動樣本不足"
+        else:
+            reason = "無動作"
 
         entry = {
             "date": str(day.date()), "action": action,
@@ -487,12 +628,19 @@ def _run(args: argparse.Namespace) -> int:
                               else round(held - applied, 4),
             "realized_vol": None if not np.isfinite(realized) else round(realized, 4),
             "cost": round(cost, 2), "target_vol": target_vol,
-            "reason": ("首次進場" if action == "enter" else
-                       "曝險帶觸發" if action == "rebalance" and band_tripped else
-                       "月度成分再平衡" if action == "rebalance" else
-                       "波動樣本不足" if action == "warmup" else "無動作"),
+            "reason": reason,
             "holdings": {k: round(v, 6) for k, v in holdings.items()},
         }
+        if vix_overlay:
+            entry["vix_level"] = (None if not np.isfinite(vix_today)
+                                  else round(float(vix_today), 4))
+            entry["vix_scalar"] = (None if not np.isfinite(vix_scalar)
+                                   else round(float(vix_scalar), 4))
+            entry["exposure_target_pre_vix"] = (None if not np.isfinite(target)
+                                                else round(target, 4))
+            entry["exposure_applied_final"] = (
+                None if applied_final is None or not np.isfinite(applied_final)
+                else round(applied_final, 4))
         _append(entry)
         last_date = day
         print(f"  {day.date()}  {action:<10} 權益 ${equity:>11,.0f}  "
@@ -578,7 +726,27 @@ def main() -> int:
                     help="summarize the record so far")
     ap.add_argument("--no-update", action="store_true",
                     help="skip the price top-up and use the cache as-is")
+    ap.add_argument("--journal-path", type=str, default=None,
+                    help="override the journal file (default: "
+                         "data/paper_v1/journal.jsonl). Not passing this "
+                         "leaves the primary ledger's path, and every run "
+                         "against it, byte-for-byte unchanged.")
+    ap.add_argument("--vix-overlay", action="store_true",
+                    help="scale the banded exposure target by "
+                         "python/portfolio/risk_controls.py's VIX-bracket "
+                         "scalar before trading. Default off; off means the "
+                         "exact pre-existing logic, unchanged.")
     args = ap.parse_args()
+    if args.journal_path:
+        # Module-level global by design: _append/_read/_run/--init all read
+        # and write through it, and this process runs exactly one command
+        # (init, advance, or report) before exiting, so mutating it once here
+        # -- before any of those run -- is safe and keeps every call site
+        # below untouched. Not passing --journal-path never reaches this
+        # branch, so the default path is never touched.
+        global JOURNAL
+        path = Path(args.journal_path)
+        JOURNAL = path if path.is_absolute() else ROOT / path
     if args.report:
         return _report()
     if not args.no_update:
